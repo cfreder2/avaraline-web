@@ -48,7 +48,7 @@ vec3 apply_fog(vec3 color, vec3 viewDir, float dist) {
 vec3 draw_celestial(vec3 inColor, float phi, float gradientHeight, vec3 offsetFragPos, int i) {
     if (lightCelestialRadius[i] == 0.0 || phi <= GROUND_PHI) return inColor;
     float dist = distance(offsetFragPos, lightPos[i]);
-    float coronaRadius = lightCelestialRadius[i] * (1 + length(lightDir[i]));
+    float coronaRadius = lightCelestialRadius[i] * (1.0 + length(lightDir[i]));
     //float horizonRadius = coronaRadius * (1 - clamp(phi, 0.0, 1.0));
     return mix(
         inColor,
@@ -57,7 +57,7 @@ vec3 draw_celestial(vec3 inColor, float phi, float gradientHeight, vec3 offsetFr
             lightColor[i] * gradientHeight + horizonColor * (1.0 - gradientHeight),
             float(phi < highAlt)
         ),
-        pow(clamp(1 - ((dist - lightCelestialRadius[i]) / (coronaRadius - lightCelestialRadius[i])), 0.0, 1.0), 4)
+        pow(clamp(1.0 - ((dist - lightCelestialRadius[i]) / (coronaRadius - lightCelestialRadius[i])), 0.0, 1.0), 4.0)
         //clamp(1 - (lightCelestialRadius[i] / coronaRadius), 0.0, 1.0)
         //float(dist <= lightCelestialRadius[i])
     );

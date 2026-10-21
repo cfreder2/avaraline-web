@@ -12,7 +12,7 @@ out vec4 color;
 vec4 light_color() {
     return mix(
         vec4(baseLightColor, 1.0) * fragmentColor,
-        (1 + extraAmbient) * fragmentColor,
+        (1.0 + extraAmbient) * fragmentColor,
         float(fragmentGlow > 0.0)
     );
 }
