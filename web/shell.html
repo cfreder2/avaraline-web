@@ -483,10 +483,15 @@
   // row, step the scale down; after eight good seconds, step back up, but not to a step
   // that was too slow in the last minute. F9 picks a scale by hand and stops the
   // automation; ?res= does too.
+  //
+  // It judges the screen by its refreshes, not by frames drawn: in a game with others, a
+  // refresh where the game waited for another player's input draws nothing, and that is
+  // the network, not the GPU (the engine reports those through Module.onAvaraWait).
+  // Drawing fewer pixels would not bring that input any sooner.
   (function () {
     var STEPS = [1.0, 0.85, 0.7, 0.6, 0.5, 0.4];
     var fpsEl = document.getElementById('fps'), shown = false;
-    var last = 0, frames = 0, worst = 0, secStart = 0, auto = !(fixedScale > 0);
+    var last = 0, frames = 0, waits = 0, worst = 0, secStart = 0, auto = !(fixedScale > 0);
     var slow = 0, good = 0, failedAt = {};
     var idx = STEPS.indexOf(renderScale); if (idx < 0) { idx = 0; renderScale = 1; Module.avaraRenderScale = 1; }
     function apply(i, why) {
@@ -497,25 +502,27 @@
       hud.textContent = 'resolution ' + Math.round(renderScale * 100) + '%' + (why ? ' (' + why + ')' : '');
       clearTimeout(apply.t); apply.t = setTimeout(function () { hud.textContent = ''; }, 1600);
     }
+    Module.onAvaraWait = function () { if (last) waits++; };     // a refresh spent waiting on the network
     Module.onAvaraFrame = function (frameNumber) {
       var t = performance.now();
       if (frameNumber < 0) {                                     // menus: not measured
         if (last && shown) fpsEl.textContent = 'fps\nin a round';
-        last = 0; secStart = 0; return;
+        last = 0; secStart = 0; waits = 0; return;
       }
       if (last) { var dt = t - last; frames++; if (dt > worst) worst = dt; }
       else secStart = t;
       last = t;
       if (t - secStart < 1000) return;
       var fps = frames * 1000 / (t - secStart), low = 1000 / worst;
+      var refreshes = (frames + waits) * 1000 / (t - secStart);   // what the screen kept up with
       if (window.AvaraTelemetry) AvaraTelemetry.fpsSample(fps, frameNumber, t);
       if (shown) fpsEl.textContent = Math.round(fps) + ' fps\nmin ' + Math.round(low) + '\nres ' + Math.round(renderScale * 100) + '%';
       if (auto) {
-        if (fps < 52) { slow++; good = 0; } else if (fps > 58) { good++; slow = 0; } else { slow = 0; good = 0; }
+        if (refreshes < 52) { slow++; good = 0; } else if (refreshes > 58) { good++; slow = 0; } else { slow = 0; good = 0; }
         if (slow >= 2 && idx < STEPS.length - 1) { failedAt[idx] = t; apply(idx + 1, 'auto'); slow = 0; }
         else if (good >= 8 && idx > 0 && !(failedAt[idx - 1] && t - failedAt[idx - 1] < 60000)) { apply(idx - 1, 'auto'); good = 0; }
       }
-      frames = 0; worst = 0; secStart = t;
+      frames = 0; waits = 0; worst = 0; secStart = t;
     };
     // The meter: F8, or Settings > Show frame rate (a Mac's F8 is play/pause without fn).
     // Remembered on this device.

@@ -97,6 +97,14 @@
     try {
       Module.ccall('avara_web_save_prefs', null, [], []);
       var text = Module.FS.readFile(FILE, { encoding: 'utf8' });
+      // while hosting, the lobby sets the latency tolerance floor from the round trip; what
+      // is kept is the player's own (AvaraLobby.state.ltOwn)
+      var own = window.AvaraLobby && AvaraLobby.state.ltOwn;
+      if (text && typeof own === 'number') {
+        var prefs = JSON.parse(text);
+        prefs.latencyToleranceMin = own;
+        text = JSON.stringify(prefs);
+      }
       if (text) AvaraSupa.store(STORE, text);
       Module.FS.readdir(DIR).forEach(function (name) {
         if (!/\.json$/.test(name) || name === 'prefs.json') return;

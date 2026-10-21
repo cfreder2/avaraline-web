@@ -42,6 +42,9 @@
     joinStarted: 0,
     heartbeat: null, listTimer: null, pushTimer: null,
     newRounds: 0,
+    ltOwn: null,                  // the player's own latency tolerance floor, while the host's replaces it
+    ltFloor: null,                // the floor in force (tuneLatency)
+    ltTimer: null,
   };
 
   function call(fn, types, args) {
@@ -165,6 +168,68 @@
     call('avara_web_host');
   }
 
+  // ---- latency tolerance: the host sets the floor from the round trip ---------------------
+  // Latency tolerance (LT, in 64 ms classic frames) is how far ahead each player's input is
+  // sent. The engine adjusts it during a round, between a floor and a ceiling taken from the
+  // host's preferences for everyone. Its adjustment was made for the desktop, where a frame
+  // waits for a late input inside the frame and goes on the moment it arrives: it counts only
+  // waits of a whole frame or more, and keeps LT where it is while up to a fifth of frames
+  // wait. In a browser a frame can only be drawn at an animation frame, so input that misses
+  // one shows as a stall (and the engine, which goes on with the frame as soon as the input
+  // arrives, between animation frames, sees little waiting and lowers LT further).
+  //
+  // So while hosting a game with others, between rounds, the host raises the floor to what
+  // the network needs, from the round trip mesh.js measures on the direct links: input sent
+  // LT ahead must cover one way of the round trip (its 75th percentile: a little of the
+  // jitter; each packet also carries the frames before it, so one late packet is often
+  // covered by the next), plus half a frame (where one browser's animation frames fall
+  // between the other's), plus 2 ms, in 60 Hz frames, rounded up to a quarter LT and never
+  // above the ceiling. That is about one frame more than the engine's own choice from the
+  // round trip, for the animation frame a browser waits for. Measured with
+  // tools/hitch_check.mjs: one-way delays of 25, 50 and 75 ms (jitter 15) play without
+  // stalls at 0.75, 1 and 1.25 to 1.5, which is what this chooses. The player's own floor
+  // comes back when hosting stops, and it is the one Settings saves.
+  var FRAME_MS = 1000 / 60;
+  function enginePref(name) {
+    var file = '/libsdl/Avaraline/Avara/prefs.json';
+    for (var i = 0; i < 2; i++) {
+      try { return JSON.parse(Module.FS.readFile(file, { encoding: 'utf8' }))[name]; }
+      catch (e) { call('avara_web_save_prefs'); }   // a first visit has no file until the engine writes one
+    }
+    return undefined;
+  }
+  function setLatencyFloor(v) {
+    var ok = false;
+    try { ok = Module.ccall('avara_web_set_pref', 'number', ['string', 'string'], ['latencyToleranceMin', v.toFixed(2)]); } catch (e) {}
+    if (ok) L.ltFloor = v;
+    return ok;
+  }
+  function tuneLatency() {
+    if (L.mode !== 'host' || L.playing) return;
+    if (L.ltOwn == null) {
+      var own = enginePref('latencyToleranceMin');
+      if (typeof own !== 'number') return;
+      L.ltOwn = own;
+      L.ltFloor = own;
+    }
+    var rtt = AvaraMesh.rtt(), want = L.ltOwn;
+    if (rtt.links > 0) {
+      var ceiling = enginePref('latencyTolerance');
+      var frames = Math.ceil((rtt.p75 / 2 + FRAME_MS / 2 + 2) / FRAME_MS);
+      want = Math.max(L.ltOwn, frames / 4);
+      if (typeof ceiling === 'number' && ceiling > 0) want = Math.min(want, Math.max(ceiling, L.ltOwn));
+    }
+    if (want !== L.ltFloor && setLatencyFloor(want)) {
+      console.log('[avara] latency tolerance floor ' + want + ' (round trip ' + Math.round(rtt.p50) + ' ms, 75th percentile ' +
+                  Math.round(rtt.p75) + ', 95th ' + Math.round(rtt.p95) + ')');
+    }
+  }
+  function restoreLatencyFloor() {
+    clearInterval(L.ltTimer); L.ltTimer = null;
+    if (L.ltOwn != null && L.ltFloor !== L.ltOwn) setLatencyFloor(L.ltOwn);
+    L.ltOwn = null; L.ltFloor = null;
+  }
+
   // ---- joining ------------------------------------------------------------------------
   function stopListing() { clearInterval(L.listTimer); L.listTimer = null; }
 
@@ -216,6 +281,7 @@
     if (was === 'host' && game) AvaraSupa.rpc('avara_close_game', { id: game.id });
     L.mode = 'menu'; L.game = null; L.roster = []; L.playing = false;
     clearTimeout(L.pushTimer);
+    restoreLatencyFloor();
     call('avara_web_leave');
     AvaraMesh.leave();
     background(false);
@@ -235,6 +301,8 @@
         loadUsualLevel();
         clearInterval(L.heartbeat);
         L.heartbeat = setInterval(sendGame, HEARTBEAT_MS);
+        clearInterval(L.ltTimer);
+        L.ltTimer = setInterval(tuneLatency, 2000);
         hideOverlay(); chip();
       } else if (d.state === 'connected' && L.mode === 'client') {
         var ms = Math.round(performance.now() - L.joinStarted);

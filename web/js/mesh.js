@@ -25,11 +25,63 @@
  *   0x00 data      [0][payload]                 a datagram from the link's other end
  *   0x01 relay     [1][to u32 LE][payload]      client -> host: pass this on to `to`
  *   0x02 relayed   [2][from u32 LE][payload]    host -> client: this came from `from`
+ *   0x03 ping      [3][seq u32 LE]              answered at once with a pong
+ *   0x04 pong      [4][seq u32 LE]
+ *
+ * The pings measure each direct link's round trip as the network has it (the engine's own
+ * measure only sees a datagram at the next animation frame, on both ends), for the host's
+ * choice of latency tolerance (web/js/lobby.js, AvaraMesh.rtt()).
  *
  * Plain script; defines window.AvaraMesh. Needs window.AvaraSupa for signaling.
+ *
+ * Network simulator, for tests (tools/hitch_check.mjs): ?netsim=delay:50,jitter:15,loss:0.01
+ * holds every datagram this tab receives for delay ms, plus or minus up to jitter ms
+ * (uniform), and drops the given fraction of them, from a seeded generator (seed:N, default
+ * 1). Both ends delaying what they receive makes the round trip 2 x delay. A relayed
+ * datagram is delayed at each hop, as a real relay would be. freeze:N,freezems:M adds the
+ * hiccups of home Wi-Fi: N times a second on average, this tab's network holds everything
+ * arriving for M ms (default 80) and then delivers it all at once. Without the parameter
+ * none of this runs: the channel's handler is the plain one.
  */
 (function () {
   'use strict';
+
+  // ?netsim=delay:50,jitter:15,loss:0,freeze:0,freezems:80,seed:1 (ms, ms, fraction 0..1,
+  // per second, ms, integer); null when off
+  var NETSIM = (function () {
+    var s = null;
+    try { s = new URLSearchParams(location.search).get('netsim'); } catch (e) {}
+    if (!s) return null;
+    var o = { delay: 0, jitter: 0, loss: 0, freeze: 0, freezems: 80, seed: 1 };
+    s.split(',').forEach(function (kv) {
+      var p = kv.split(':');
+      if (p.length === 2 && p[0] in o && isFinite(+p[1])) o[p[0]] = +p[1];
+    });
+    function mulberry32(a) {
+      a = a >>> 0;
+      return function () {
+        a = (a + 0x6D2B79F5) | 0;
+        var t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    o.rand = mulberry32(o.seed);
+    var frand = mulberry32(o.seed + 0x9E3779B9), windows = [], nextAt = 0;
+    // The freezes, a Poisson process on this tab's clock: a datagram due to arrive inside
+    // one arrives as it ends.
+    o.arrival = function (at) {
+      if (!(o.freeze > 0)) return at;
+      if (!nextAt) nextAt = performance.now() + -Math.log(1 - frand()) * 1000 / o.freeze;
+      while (nextAt <= at) { windows.push([nextAt, nextAt + o.freezems]); nextAt += -Math.log(1 - frand()) * 1000 / o.freeze; }
+      while (windows.length && windows[0][1] < at - 1000) windows.shift();
+      for (var i = 0; i < windows.length; i++) if (at >= windows[i][0] && at < windows[i][1]) return windows[i][1];
+      return at;
+    };
+    console.log('[avara-mesh] netsim on: delay ' + o.delay + ' ms, jitter ' + o.jitter + ' ms, loss ' + o.loss +
+                (o.freeze ? ', ' + o.freeze + ' freezes/s of ' + o.freezems + ' ms' : '') + ', seed ' + o.seed);
+    return o;
+  })();
 
   var RELAYED_AFTER_MS = 6000;     // still going through the host by then: report it
   var WANT_EVERY_MS = 1500;        // re-ask a higher-id peer to offer until it does
@@ -39,6 +91,8 @@
                                    // or ICE candidate can leave a link "connecting" forever)
   var QUEUE_MAX = 256;             // datagrams held per peer while a link opens
   var INQ_MAX = 4096;              // datagrams held for the engine (it drains every frame)
+  var PING_EVERY_MS = 250;         // each open link's round trip, measured this often
+  var PING_KEEP = 64;              // and the last this many kept (16 s)
 
   // STUN finds each side's public address; TURN, when configured, relays for networks
   // that STUN cannot get through. window.AVARA_ICE (set by the page) can add servers.
@@ -110,7 +164,17 @@
       });
     };
     dc.onclose = function () { l.open = false; };
-    dc.onmessage = function (ev) { onData(l, new Uint8Array(ev.data)); };
+    dc.onmessage = NETSIM ? function (ev) { netsimDeliver(l, ev.data); }
+                          : function (ev) { onData(l, new Uint8Array(ev.data)); };
+  }
+
+  // The simulator's late delivery (only with ?netsim=). A datagram still in flight when the
+  // game is left is dropped, as the closed link would have dropped it.
+  function netsimDeliver(l, data) {
+    if (NETSIM.loss > 0 && NETSIM.rand() < NETSIM.loss) { M.counters.simLost = (M.counters.simLost || 0) + 1; return; }
+    var t = performance.now(), ms = Math.max(0, NETSIM.delay + (2 * NETSIM.rand() - 1) * NETSIM.jitter), game = M.gameId;
+    ms = NETSIM.arrival(t + ms) - t;
+    setTimeout(function () { if (M.gameId === game) onData(l, new Uint8Array(data)); }, ms);
   }
 
   function makePc(l) {
@@ -232,16 +296,42 @@
     } else if (op === 2 && b.length >= 5) {
       M.counters.relayedIn++;
       push(readU32le(b, 1), b.subarray(5));
+    } else if (op === 3 && b.length >= 5) {
+      sendFramed(l, frame(4, readU32le(b, 1), NOTHING));
+    } else if (op === 4 && b.length >= 5) {
+      var sent = l.pings && l.pings[readU32le(b, 1)];
+      if (sent) {
+        delete l.pings[readU32le(b, 1)];
+        l.rtts.push(now() - sent);
+        if (l.rtts.length > PING_KEEP) l.rtts.shift();
+      }
     }
+  }
+
+  var NOTHING = new Uint8Array(0);
+  function ping() {
+    var t = now();
+    M.peers.forEach(function (l) {
+      if (!l.open) return;
+      if (!l.pings) { l.pings = {}; l.rtts = []; l.pingSeq = 0; }
+      l.pingSeq = (l.pingSeq + 1) >>> 0;
+      l.pings[l.pingSeq] = t;
+      delete l.pings[l.pingSeq - 40];     // never answered (lost): forget it after 10 s
+      sendFramed(l, frame(3, l.pingSeq, NOTHING));
+    });
   }
 
   function push(from, bytes) {
     M.inq.push({ from: from, bytes: bytes });
     if (M.inq.length > INQ_MAX) { M.inq.shift(); M.counters.dropped++; }
+    if (M.onarrive) M.onarrive();
   }
 
   // ---- the engine's side (library_avara_net.js) -----------------------------------------
   M.attach = function () {};
+  // Called after every datagram is queued for the engine. library_avara_net.js sets it: a
+  // game waiting on this datagram need not wait for the next animation frame to use it.
+  M.onarrive = null;
 
   M.send = function (to, bytes) {
     if (!to || to === M.id || !M.chan) return;
@@ -287,6 +377,8 @@
         if (l.queue.length || l.relaySince) ensure(l);
       });
     }, 1000);
+    clearInterval(M.pingTimer);
+    M.pingTimer = setInterval(ping, PING_EVERY_MS);
   };
 
   // Leave the game: say goodbye, and close the links once the engine's logout has had a
@@ -297,7 +389,7 @@
     signal({ t: 'bye' });
     M.chan = null; M.gameId = null; M.hostId = null; M.isHost = false;
     M.peers = new Map(); M.inq = [];
-    clearInterval(M.timer);
+    clearInterval(M.timer); clearInterval(M.pingTimer);
     var done = function () { peers.forEach(function (l) { closeLink(l); }); chan.close(); };
     if (now_) done(); else setTimeout(done, 400);
   };
@@ -308,6 +400,23 @@
     M.peers.forEach(function (l) {
       out.push({ peer: hex(l.id), open: l.open, relay: !l.open && l.relay, path: l.path, sent: l.sent || 0, queued: l.queue.length,
                  ms: l.openedMs, state: l.pc ? l.pc.connectionState : 'none' });
+    });
+    return out;
+  };
+
+  // The round trip over the direct links, ms, from the last 16 s of pings: the median, the
+  // 75th and the 95th percentiles, each the worst link's (links with fewer than 8 answers
+  // left out).
+  M.rtt = function () {
+    var out = { links: 0, p50: 0, p75: 0, p95: 0 };
+    M.peers.forEach(function (l) {
+      if (!l.open || !l.rtts || l.rtts.length < 8) return;
+      var s = l.rtts.slice().sort(function (a, b) { return a - b; });
+      var at = function (q) { return s[Math.min(s.length - 1, Math.floor(s.length * q))]; };
+      out.links++;
+      out.p50 = Math.max(out.p50, at(0.5));
+      out.p75 = Math.max(out.p75, at(0.75));
+      out.p95 = Math.max(out.p95, at(0.95));
     });
     return out;
   };
@@ -329,5 +438,7 @@
   }
 
   M.hex = hex;
+  M.netsim = NETSIM && { delay: NETSIM.delay, jitter: NETSIM.jitter, loss: NETSIM.loss, freeze: NETSIM.freeze,
+                         freezems: NETSIM.freezems, seed: NETSIM.seed };
   window.AvaraMesh = M;
 })();
