@@ -44,8 +44,8 @@ if (!arg('--no-make')) {
   const jobs = String(Math.max(2, (await import('node:os')).cpus().length));
   // the version header first, on its own: make decides what to rebuild before running any
   // rule, so a header rewritten during the same run would not reach the objects until next time
-  spawnSync('make', ['-f', 'Makefile.emscripten', 'version'], { cwd: ROOT, stdio: 'inherit' });
-  const r = spawnSync('make', ['-f', 'Makefile.emscripten', '-j' + jobs], { cwd: ROOT, stdio: 'inherit' });
+  spawnSync('make', ['-f', 'Makefile.emscripten', 'NODE=' + process.execPath, 'version'], { cwd: ROOT, stdio: 'inherit' });
+  const r = spawnSync('make', ['-f', 'Makefile.emscripten', 'NODE=' + process.execPath, '-j' + jobs], { cwd: ROOT, stdio: 'inherit' });
   if (r.status) fail('make failed. Is emscripten on PATH? (source ../emsdk/emsdk_env.sh)');
 }
 for (const f of ['avara.html', 'avara.js', 'avara.wasm', 'avara.data', 'levels/index.json']) {
