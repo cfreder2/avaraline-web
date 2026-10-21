@@ -435,7 +435,8 @@ void ModernOpenGLRenderer::RenderFrame()
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, sizeof(skyboxVertices));
+    // The count is in vertices (3 floats each), not bytes; a byte count reads far past the buffer.
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, sizeof(skyboxVertices) / (sizeof(float) * 3));
     glDisableVertexAttribArray(0);
 
     // RENDER WORLD ////////////////////////////////////////////////////////////////////////////////

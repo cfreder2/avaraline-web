@@ -75,7 +75,7 @@ float noise() {
 vec4 light_color(vec3 viewDir) {
     return mix(
         vec4(baseLightColor + spec(viewDir), 1.0) * fragmentColor,
-        (1 + extraAmbient) * fragmentColor,
+        (1.0 + extraAmbient) * fragmentColor,
         float(fragmentGlow > 0.0)
     );
 }
