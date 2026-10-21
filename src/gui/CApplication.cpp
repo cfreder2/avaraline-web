@@ -21,8 +21,27 @@ json CApplication::_defaultPrefs = ReadDefaultPrefs();
     #define AVARA_GL_MINOR 3
 #endif
 
+#ifdef __EMSCRIPTEN__
+// The browser: 4x multisampling, because the renderer it uses has no anti-aliasing pass
+// and Avara's thin trims and bevels otherwise break into dashes that crawl as the view
+// moves; and no alpha channel, because a canvas with one lets fragments the shaders fade
+// (the far-distance fade) show the page behind instead of fading as on the desktop.
+#include <emscripten.h>
+// The page decides (web/shell.html): off for software renderers, where 4x costs half the
+// frame rate, and when the player turned it off in Settings.
+EM_JS(int, avara_msaa_samples, (), {
+    return (typeof Module !== 'undefined' && Module.avaraMSAA >= 0) ? Module.avaraMSAA : 4;
+});
+#define AVARA_ALPHA_BITS 0
+#define AVARA_MSAA_SAMPLES avara_msaa_samples()
+
+#endif /* __EMSCRIPTEN__ */
 CApplication::CApplication(std::string title) :
+#ifndef __EMSCRIPTEN__
 nanogui::Screen(nanogui::Vector2i(_prefs[kWindowWidth], _prefs[kWindowHeight]), title, true, _prefs[kFullScreenTag], 8, 8, 24, 8, 0, AVARA_GL_MAJOR, AVARA_GL_MINOR) {
+#else /* __EMSCRIPTEN__ */
+nanogui::Screen(nanogui::Vector2i(_prefs[kWindowWidth], _prefs[kWindowHeight]), title, true, _prefs[kFullScreenTag], 8, AVARA_ALPHA_BITS, 24, 8, AVARA_MSAA_SAMPLES, AVARA_GL_MAJOR, AVARA_GL_MINOR) {
+#endif /* __EMSCRIPTEN__ */
     gApplication = this;
     setResizeCallback([this](nanogui::Vector2i newSize) {
         this->WindowResized(newSize.x, newSize.y);

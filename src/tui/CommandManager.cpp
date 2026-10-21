@@ -1,5 +1,8 @@
 
 #include "CommandManager.h"
+#ifdef __EMSCRIPTEN__
+#include "WebBridge.h"
+#endif /* __EMSCRIPTEN__ */
 
 #include "AssetManager.h"
 #include "CAvaraApp.h"
@@ -124,8 +127,14 @@ CommandManager::CommandManager(CAvaraAppImpl *theApp) : itsApp(theApp) {
 
     cmd = new TextCommand("/quit            <- quit",
                           [this](VectorOfArgs vargs) -> bool {
+#ifndef __EMSCRIPTEN__
         itsApp->Done();
 	leave();
+#else /* __EMSCRIPTEN__ */
+        // A page cannot quit; shutting the engine down would leave a black canvas. The page
+        // takes the player back to its menu instead (and out of any game).
+        WebEvent("quit", "{}");
+#endif /* __EMSCRIPTEN__ */
         return false;
     });
     TextCommand::Register(cmd);

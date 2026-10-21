@@ -5,7 +5,9 @@
 #include "CAvaraApp.h"
 
 #include <json.hpp>
+#ifndef __EMSCRIPTEN__
 #include "httplib.h"
+#endif /* __EMSCRIPTEN__ */
 
 using json = nlohmann::json;
 
@@ -176,6 +178,7 @@ bool CTrackerWindow::editing() {
 }
 
 void CTrackerWindow::Query() {
+#ifndef __EMSCRIPTEN__
     std::string address = gApplication->String(kTrackerAddress);
     httplib::Client client(address.c_str(), 80);
     auto resp = client.Get("/api/v1/games/");
@@ -212,4 +215,9 @@ void CTrackerWindow::Query() {
 
         setNeedsLayout();
     }
+#else /* __EMSCRIPTEN__ */
+    // TODO(web): fetch the tracker list via the Fetch API / relay instead of
+    // raw HTTP. Disabled for the offline render milestone.
+    return;
+#endif /* __EMSCRIPTEN__ */
 }

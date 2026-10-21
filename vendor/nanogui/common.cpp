@@ -50,8 +50,16 @@ void init() {
         setlocale(LC_NUMERIC, "C");
     #endif
 
+#ifndef __EMSCRIPTEN__
     if (SDL_Init(SDL_INIT_EVERYTHING) != 0)
         throw std::runtime_error("Could not initialize SDL!");
+#else /* __EMSCRIPTEN__ */
+    // SDL_INIT_EVERYTHING pulls in haptic/sensor subsystems that the browser's
+    // SDL port can't provide and fails the whole init. Request only what exists.
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS |
+                 SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0)
+        throw std::runtime_error(std::string("Could not initialize SDL! ") + SDL_GetError());
+#endif /* __EMSCRIPTEN__ */
 
     setTime(0);
 }
@@ -59,16 +67,57 @@ void init() {
 static bool mainloop_active = false;
 int throttle = 0;
 
+#ifndef __EMSCRIPTEN__
 void mainloop(int refresh) {
     throttle = refresh;
     if (mainloop_active)
         throw std::runtime_error("Main loop is already running!");
+#else /* __EMSCRIPTEN__ */
+#include <emscripten.h>
+#include <emscripten/html5.h>
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
     mainloop_active = true;
+#else /* __EMSCRIPTEN__ */
+EM_JS(double, avara_get_render_scale, (), {
+    return (typeof Module !== 'undefined' && Module.avaraRenderScale > 0) ? Module.avaraRenderScale : 1.0;
+});
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
     //try {
         SDL_Event theEvent;
+#else /* __EMSCRIPTEN__ */
+// Re-apply the render-resolution scale whenever it changes (live, e.g. from a
+// hotkey). Shrinking the canvas drawing buffer makes the next frame's
+// glViewport (read from SDL_GL_GetDrawableSize) render at the lower resolution;
+// the full-size CSS canvas upscales it. Uniform scale keeps the aspect ratio,
+// so the projection needs no update.
+// Also re-applied when the page resizes (checked every 15 refreshes): a resize
+// puts the canvas back to full size, which would quietly undo the scale.
+static void avara_poll_render_scale() {
+    static double applied = -1.0;
+    static int want_w = 0, want_h = 0, countdown = 0;
+    double s = avara_get_render_scale();
+    if (s == applied && --countdown > 0) return;
+    countdown = 15;
+    double cssW = 0, cssH = 0;
+    if (emscripten_get_element_css_size("#canvas", &cssW, &cssH) != EMSCRIPTEN_RESULT_SUCCESS)
+        return;
+    double dpr = emscripten_get_device_pixel_ratio();
+    int w = (int)(cssW * dpr * s), h = (int)(cssH * dpr * s);
+    int cur_w = 0, cur_h = 0;
+    emscripten_get_canvas_element_size("#canvas", &cur_w, &cur_h);
+    if (s == applied && w == want_w && h == want_h && cur_w == w && cur_h == h) return;
+    applied = s;
+    want_w = w; want_h = h;
+    if (w > 0 && h > 0 && (cur_w != w || cur_h != h))
+        emscripten_set_canvas_element_size("#canvas", w, h);
+}
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
         while (mainloop_active) {
             int numScreens = 0;
             for(auto screen : __nanogui_screens) {
@@ -79,7 +128,21 @@ void mainloop(int refresh) {
                 screen->drawAll();
                 numScreens++;
             }
+#else /* __EMSCRIPTEN__ */
+// One iteration, driven by the browser's requestAnimationFrame via
+// emscripten_set_main_loop. We do NOT use ASYNCIFY: it more than doubled the
+// wasm size (14MB -> 35MB) and made the cold module take ~30s to initialize in
+// the browser (a "Page Unresponsive" freeze). Nothing in the engine may block
+// waiting for the network; see the multiplayer notes in CPlayerManager.cpp.
+//
+// Input events are pumped every rAF. How many game ticks this refresh gets is
+// decided by WebPacer in CAvaraAppImpl::idle(), which counts refreshes instead of
+// comparing timestamps, so callback jitter cannot drop a frame.
+static void mainloop_iter() {
+    avara_poll_render_scale();   // apply live render-scale changes
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             if (numScreens == 0) {
                 /* Give up if there was nothing to draw */
                 mainloop_active = false;
@@ -96,14 +159,50 @@ void mainloop(int refresh) {
                     screen->handleSDLEvent(theEvent);
                 }
             }
+#else /* __EMSCRIPTEN__ */
+    SDL_Event theEvent;
+    while (SDL_PollEvent(&theEvent)) {
+        if (theEvent.type == SDL_QUIT) {
+            mainloop_active = false;
+#endif /* __EMSCRIPTEN__ */
         }
+#ifdef __EMSCRIPTEN__
+        for (auto screen : __nanogui_screens) {
+            screen->handleSDLEvent(theEvent);
+        }
+    }
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
         /* Process events once more */
         SDL_PollEvent(&theEvent);
     //} catch (const std::exception &e) {
     //    std::cerr << "Caught exception in main loop: " << e.what() << std::endl;
     //    leave();
     //}
+#else /* __EMSCRIPTEN__ */
+    for (auto screen : __nanogui_screens) {
+        if (!screen->visible())
+            continue;
+        screen->idle();
+        screen->drawAll();
+    }
+}
+
+// One pass of the loop on demand: while the tab is hidden the page pauses the
+// requestAnimationFrame loop (a hidden tab gets none) and calls this from a Web Worker's
+// clock instead (see web/js/lobby.js, avara_web_background).
+extern "C" EMSCRIPTEN_KEEPALIVE void avara_web_tick() {
+    mainloop_iter();
+}
+
+void mainloop(int refresh) {
+    throttle = refresh;
+    mainloop_active = true;
+    // fps=0 -> requestAnimationFrame (display-synced); simulate_infinite_loop=1
+    // unwinds the C++ stack and hands control to the browser. No ASYNCIFY.
+    emscripten_set_main_loop(mainloop_iter, 0, 1);
+#endif /* __EMSCRIPTEN__ */
 }
 
 void leave() {

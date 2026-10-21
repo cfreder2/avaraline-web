@@ -178,6 +178,19 @@ public:
 
     uint32_t frameStart;
     uint32_t nextScheduledFrame;
+#ifdef __EMSCRIPTEN__
+
+    // When set, the caller decides when a frame is due (the browser build paces ticks to
+    // the display) and GameTick only advances while tickAllowed is true.
+    bool externalPacing = false;
+    bool tickAllowed = true;
+    FrameNumber pollFrameNumber = -1;   // the frame RemoteFramesReady last polled for
+
+    // A start or resume the browser is finishing over several frames (see PollStart).
+    enum StartPhase { kStartIdle, kStartGathering, kStartSyncing };
+    StartPhase startPhase = kStartIdle;
+    Boolean startFreshMission = false;
+#endif /* __EMSCRIPTEN__ */
     uint32_t nextPingTime;
     uint32_t nextLoadTime;
 
@@ -250,7 +263,16 @@ public:
     virtual bool IsPlaying();
     virtual void HandleEvent(SDL_Event &event);
     virtual void GameStart();
+#ifdef __EMSCRIPTEN__
+    virtual void GameStartPrepare();
+    virtual void GameStartFinish();
+    virtual bool StartAfterGather(Boolean doStart, Boolean freshMission);
+    virtual void PollStart();
+#endif /* __EMSCRIPTEN__ */
     virtual bool GameTick();
+#ifdef __EMSCRIPTEN__
+    virtual bool RemoteFramesReady();
+#endif /* __EMSCRIPTEN__ */
     virtual void GameStop();
     virtual ~CAvaraGame();
     virtual void DoStats(uint32_t frameStartTime, int interval);

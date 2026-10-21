@@ -1348,7 +1348,18 @@ void CUDPComm::Disconnect() {
 
     isClosing = true;
 
+#ifdef __EMSCRIPTEN__
+    // The desktop waits up to 20 s here for the others to acknowledge the logout. A tab
+    // cannot wait (their acks could not arrive while it did), and the logout has already
+    // been handed to the DataChannels; peers that miss it time the connection out.
+#endif /* __EMSCRIPTEN__ */
     if (isConnected) {
+#ifdef __EMSCRIPTEN__
+        ProcessQueue();
+        isConnected = false;
+    }
+    if (isConnected) {
+#endif /* __EMSCRIPTEN__ */
         startTicks = TickCount();
 
         do {
@@ -1430,10 +1441,15 @@ void CUDPComm::CreateServer() {
 }
 
 OSErr CUDPComm::ContactServer(IPaddress &serverAddr) {
+#ifndef __EMSCRIPTEN__
     if (noErr == CreateStream(localPort)) {
         long startTime;
+#else /* __EMSCRIPTEN__ */
+    if (noErr == BeginContactServer(serverAddr)) {
+#endif /* __EMSCRIPTEN__ */
         SDL_Event theEvent;
 
+#ifndef __EMSCRIPTEN__
         // Before we "connect", notify the punch server so it can tell the host to open a hole to us
         if (!CUDPComm::IsLAN(serverAddr.host)) {
             RequestPunch(serverAddr);
@@ -1451,12 +1467,17 @@ OSErr CUDPComm::ContactServer(IPaddress &serverAddr) {
 
         startTime = SDL_GetTicks();
 
+#endif /* __EMSCRIPTEN__ */
         /* TODO: connecting to server dialog
         gApplication->SetCommandParams(kUDPPopStrings, kBusyContactingServer, true, 0);
         gApplication->BroadcastCommand(kBusyStartCmd);
         */
 
+#ifndef __EMSCRIPTEN__
         while (!clientReady && rejectReason == noErr) { // give the system some time...
+#else /* __EMSCRIPTEN__ */
+        while (PollContactServer() == 0) { // give the system some time...
+#endif /* __EMSCRIPTEN__ */
 
             /* TODO: cancel connect dialog
             gApplication->BroadcastCommand(kBusyTimeCmd);
@@ -1471,31 +1492,100 @@ OSErr CUDPComm::ContactServer(IPaddress &serverAddr) {
                     rejectReason = 1;
                 }
             }
+#ifdef __EMSCRIPTEN__
+        }
+    }
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             if ((SDL_GetTicks() - startTime) > kClientConnectTimeoutMsec) {
                 rejectReason = 2;
             }
+#else /* __EMSCRIPTEN__ */
+    return rejectReason;
+}
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             ProcessQueue();
         }
+#else /* __EMSCRIPTEN__ */
+OSErr CUDPComm::BeginContactServer(IPaddress &serverAddr) {
+    if (noErr != CreateStream(localPort)) {
+        return rejectReason;
+    }
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
         gApplication->BroadcastCommand(kBusyEndCmd);
         gApplication->BroadcastCommand(kBusyHideCmd);
+#else /* __EMSCRIPTEN__ */
+    // Before we "connect", notify the punch server so it can tell the host to open a hole to us
+    if (!CUDPComm::IsLAN(serverAddr.host)) {
+        RequestPunch(serverAddr);
+    }
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
         if (clientReady) {
             isConnected = true;
             rejectReason = noErr;
         } else {
             Disconnect();
+#else /* __EMSCRIPTEN__ */
+    seed = static_cast<int32_t>(TickCount());
+    connections->myId = 0;
+    connections->port = serverAddr.port;
+    connections->ipAddr = serverAddr.host;
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             if (rejectReason != 1) {
                 SDL_Log("REJECTED!!! %d\n", rejectReason);
             }
+#else /* __EMSCRIPTEN__ */
+    SDL_Log("Connecting to %s (seed=%d) from port %d\n", FormatAddr(connections).c_str(), seed, localPort);
+
+    AsyncRead();
+    SendPacket(kdServerOnly, kpPacketProtocolLogin, 0, 0, seed, password[0] + 1, (Ptr)password);
+
+    contactStartTime = SDL_GetTicks();
+    return noErr;
+}
+
+int CUDPComm::PollContactServer() {
+    const uint32_t timeout = kWebConnectTimeoutMsec;
+    if (!clientReady && rejectReason == noErr) {
+        if ((SDL_GetTicks() - contactStartTime) > timeout) {
+            rejectReason = 2;
+#endif /* __EMSCRIPTEN__ */
         }
+#ifdef __EMSCRIPTEN__
+        ProcessQueue();
+        if (!clientReady && rejectReason == noErr) {
+            return 0;
+        }
+#endif /* __EMSCRIPTEN__ */
     }
 
+#ifndef __EMSCRIPTEN__
     return rejectReason;
     return noErr;
+#else /* __EMSCRIPTEN__ */
+    gApplication->BroadcastCommand(kBusyEndCmd);
+    gApplication->BroadcastCommand(kBusyHideCmd);
+
+    if (clientReady) {
+        isConnected = true;
+        rejectReason = noErr;
+        return 1;
+    }
+    Disconnect();
+    if (rejectReason != 1) {
+        SDL_Log("REJECTED!!! %d\n", rejectReason);
+    }
+    return -1;
+#endif /* __EMSCRIPTEN__ */
 }
 
 void CUDPComm::Connect(std::string address) {
@@ -1519,6 +1609,28 @@ void CUDPComm::Connect(std::string address, std::string passwordStr) {
     BlockMoveData(passwordStr.c_str(), password + 1, password[0]);
 
     ContactServer(addr);
+#ifdef __EMSCRIPTEN__
+}
+
+void CUDPComm::ConnectAsync(std::string address, std::string passwordStr) {
+    SDL_Log("ConnectAsync address = %s pw length=%zu", address.c_str(), passwordStr.size());
+
+    OpenAvaraTCP();
+
+    long serverPort = gApplication->Number(kDefaultUDPPort);
+    localPort = gApplication->Number(kDefaultClientUDPPort, 0);
+
+    IPaddress addr;
+    if (ResolveHost(&addr, address.c_str(), serverPort) != noErr) {
+        rejectReason = 3;
+        return;
+    }
+
+    password[0] = passwordStr.length();
+    BlockMoveData(passwordStr.c_str(), password + 1, password[0]);
+
+    BeginContactServer(addr);
+#endif /* __EMSCRIPTEN__ */
 }
 
 void CUDPComm::StartServing() {

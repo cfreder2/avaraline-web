@@ -12,6 +12,9 @@
 */
 
 #include <nanogui/screen.h>
+#ifdef __EMSCRIPTEN__
+#include "DrawableSize.h"
+#endif /* __EMSCRIPTEN__ */
 #include <nanogui/theme.h>
 #include <nanogui/opengl.h>
 #include <nanogui/window.h>
@@ -25,6 +28,17 @@
     #include <windows.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+    #include <emscripten.h>
+    #include <emscripten/html5.h>
+    // Render-resolution scale (1.0 = full). Lower values shrink the GL drawing
+    // buffer to cut fragment/fill cost; CSS upscales it to the display.
+    EM_JS(double, avara_render_scale, (), {
+        return (typeof Module !== 'undefined' && Module.avaraRenderScale > 0)
+               ? Module.avaraRenderScale : 1.0;
+    });
+
+#endif /* __EMSCRIPTEN__ */
 #if defined(AVARA_GLES)
     #define NANOVG_GLES3_IMPLEMENTATION
 #else
@@ -111,7 +125,11 @@ static float get_pixel_ratio(SDL_Window *window) {
 
 #else
     Vector2i fbSize, size;
+#ifndef __EMSCRIPTEN__
     SDL_GL_GetDrawableSize(window, &fbSize[0], &fbSize[1]);
+#else /* __EMSCRIPTEN__ */
+    AvaraDrawableSize(window, &fbSize[0], &fbSize[1]);
+#endif /* __EMSCRIPTEN__ */
     SDL_GetWindowSize(window, &size[0], &size[1]);
     return (float)fbSize[0] / (float)size[0];
 #endif
@@ -133,9 +151,17 @@ Screen::Screen(const Vector2i &size, const std::string &caption, bool resizable,
 
     /* Request a forward compatible OpenGL glMajor.glMinor core profile context.
        Default value is an OpenGL 3.3 core profile context. */
+#ifndef __EMSCRIPTEN__
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, glMajor);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, glMinor);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#else /* __EMSCRIPTEN__ */
+    // The browser only offers WebGL2, which is OpenGL ES 3.0. Force an ES 3.0
+    // context regardless of the requested desktop version.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#endif /* __EMSCRIPTEN__ */
 
     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, colorBits);
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, colorBits);
@@ -171,6 +197,22 @@ Screen::Screen(const Vector2i &size, const std::string &caption, bool resizable,
 
     SDL_GL_MakeCurrent(mSDLWindow, mGLContext);
 
+#ifdef __EMSCRIPTEN__
+    // Apply the render-resolution scale by shrinking the canvas drawing buffer;
+    // the full-size CSS canvas upscales the result. SDL is not told (it cannot be),
+    // so sizes are read from the canvas afterwards: AvaraDrawableSize.
+    {
+        double rscale = avara_render_scale();
+        if (rscale > 0.0 && rscale < 0.999) {
+            int dw = 0, dh = 0;
+            SDL_GL_GetDrawableSize(mSDLWindow, &dw, &dh);
+            int sw = (int)(dw * rscale), sh = (int)(dh * rscale);
+            if (sw > 0 && sh > 0)
+                emscripten_set_canvas_element_size("#canvas", sw, sh);
+        }
+    }
+
+#endif /* __EMSCRIPTEN__ */
 #if defined(NANOGUI_GLAD)
     if (!gladInitialized) {
         gladInitialized = true;
@@ -185,7 +227,11 @@ Screen::Screen(const Vector2i &size, const std::string &caption, bool resizable,
     }
 #endif
 
+#ifndef __EMSCRIPTEN__
     SDL_GL_GetDrawableSize(mSDLWindow, &mFBSize[0], &mFBSize[1]);
+#else /* __EMSCRIPTEN__ */
+    AvaraDrawableSize(mSDLWindow, &mFBSize[0], &mFBSize[1]);
+#endif /* __EMSCRIPTEN__ */
     glViewport(0, 0, mFBSize[0], mFBSize[1]);
     glClearColor(mBackground[0], mBackground[1], mBackground[2], mBackground[3]);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
@@ -211,7 +257,11 @@ void Screen::initialize(SDL_Window *window, bool shutdownSDLOnDestruct) {
     mWindowID = SDL_GetWindowID(mSDLWindow);
     mShutdownSDLOnDestruct = shutdownSDLOnDestruct;
     SDL_GetWindowSize(mSDLWindow, &mSize[0], &mSize[1]);
+#ifndef __EMSCRIPTEN__
     SDL_GL_GetDrawableSize(mSDLWindow, &mFBSize[0], &mFBSize[1]);
+#else /* __EMSCRIPTEN__ */
+    AvaraDrawableSize(mSDLWindow, &mFBSize[0], &mFBSize[1]);
+#endif /* __EMSCRIPTEN__ */
 
     mPixelRatio = get_pixel_ratio(window);
 
@@ -246,9 +296,11 @@ void Screen::initialize(SDL_Window *window, bool shutdownSDLOnDestruct) {
        flags |= NVG_STENCIL_STROKES;
     if (nSamples <= 1)
        flags |= NVG_ANTIALIAS;
+#ifndef __EMSCRIPTEN__
 #if !defined(NDEBUG)
     flags |= NVG_DEBUG;
 #endif
+#endif /* __EMSCRIPTEN__ */
 
 #if defined(AVARA_GLES)
     mNVGContext = nvgCreateGLES3(flags);
@@ -352,7 +404,11 @@ void Screen::drawWidgets() {
         return;
 
     SDL_GL_MakeCurrent(mSDLWindow, mGLContext);
+#ifndef __EMSCRIPTEN__
     SDL_GL_GetDrawableSize(mSDLWindow, &mFBSize[0], &mFBSize[1]);
+#else /* __EMSCRIPTEN__ */
+    AvaraDrawableSize(mSDLWindow, &mFBSize[0], &mFBSize[1]);
+#endif /* __EMSCRIPTEN__ */
     SDL_GetWindowSize(mSDLWindow, &mSize[0], &mSize[1]);
 
 #if defined(_WIN32) || defined(__linux__)
@@ -585,7 +641,11 @@ bool Screen::scrollCallbackEvent(double x, double y) {
 
 bool Screen::resizeCallbackEvent(int, int) {
     Vector2i fbSize, size;
+#ifndef __EMSCRIPTEN__
     SDL_GL_GetDrawableSize(mSDLWindow, &fbSize[0], &fbSize[1]);
+#else /* __EMSCRIPTEN__ */
+    AvaraDrawableSize(mSDLWindow, &fbSize[0], &fbSize[1]);
+#endif /* __EMSCRIPTEN__ */
     SDL_GetWindowSize(mSDLWindow, &size[0], &size[1]);
 
 #if defined(_WIN32) || defined(__linux__)

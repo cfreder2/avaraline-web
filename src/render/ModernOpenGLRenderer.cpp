@@ -2,6 +2,9 @@
 
 #include "AssetManager.h"
 #include "ColorManager.h"
+#ifdef __EMSCRIPTEN__
+#include "Debug.h"
+#endif /* __EMSCRIPTEN__ */
 #include "FastMat.h"
 #include "OpenGLVertices.h"
 
@@ -100,10 +103,12 @@ const char *glGetErrorString(GLenum error)
             return "Invalid Framebuffer Operation";
         case GL_OUT_OF_MEMORY:
             return "Out of Memory";
+#ifndef __EMSCRIPTEN__
         case GL_STACK_UNDERFLOW:
             return "Stack Underflow";
         case GL_STACK_OVERFLOW:
             return "Stack Overflow";
+#endif /* __EMSCRIPTEN__ */
         // case GL_CONTEXT_LOST:
         //     return "Context Lost";
         default:
@@ -113,6 +118,12 @@ const char *glGetErrorString(GLenum error)
 
 void _glCheckErrors(const char *filename, int line)
 {
+#ifdef __EMSCRIPTEN__
+    // In a browser glGetError is a round trip to the GPU process that waits for every
+    // command before it. Checked after each draw, it was 92% of the frame and held the
+    // game near 45 fps. Only when debugging GL (/dbg gl).
+    if (!Debug::IsEnabled("gl")) return;
+#endif /* __EMSCRIPTEN__ */
     GLenum err;
     while ((err = glGetError()) != GL_NO_ERROR)
         SDL_Log("OpenGL Error: %s (%d) [%u] %s\n", filename, line, err, glGetErrorString(err));

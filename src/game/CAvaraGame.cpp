@@ -49,6 +49,9 @@
 #include "ARGBColor.h"
 #include "Debug.h"
 #include "AbstractRenderer.h"
+#ifdef __EMSCRIPTEN__
+#include "WebBridge.h"
+#endif /* __EMSCRIPTEN__ */
 
 void CAvaraGame::InitMixer(Boolean silentFlag) {
     CSoundMixer *aMixer;
@@ -758,7 +761,36 @@ void CAvaraGame::ResumeGame() {
     // TODO: gathering players dialog
 
     ReadGamePrefs();
+#ifdef __EMSCRIPTEN__
+    if (externalPacing) {
+        // The browser cannot wait for the other players here; PollStart carries on from
+        // GameTick, once a refresh, until the game is running.
+        itsNet->BeginGatherPlayers();
+        startFreshMission = freshMission;
+        startPhase = kStartGathering;
+        PollStart();
+        return;
+    }
+#endif /* __EMSCRIPTEN__ */
     doStart = itsNet->GatherPlayers(freshMission);
+#ifdef __EMSCRIPTEN__
+    if (StartAfterGather(doStart, freshMission)) {
+        // Start the game, run the first tick
+        GameStart();
+        GameTick();
+
+        // while(statusRequest == kPlayingStatus)
+        //    GameTick();
+    }
+
+    // SetPort(itsWindow);
+    // InvalRect(&itsWindow->portRect);
+}
+
+// What ResumeGame does once the players are gathered, up to starting the game. False when
+// it will not start.
+bool CAvaraGame::StartAfterGather(Boolean doStart, Boolean freshMission) {
+#endif /* __EMSCRIPTEN__ */
     SDL_Log("CAvaraGame::ResumeGame (start=%d)\n", doStart);
 
     if (doStart) {
@@ -780,6 +812,7 @@ void CAvaraGame::ResumeGame() {
         lastFramePackets = itsNet->itsCommManager->TotalPacketsSent();
         nextStatTime = SDL_GetTicks();
         SDL_Log("lastFrameTime = %ld, lastFramePackets = %u\n", lastFrameTime, uint32_t(lastFramePackets));
+#ifndef __EMSCRIPTEN__
 
         // Start the game, run the first tick
         GameStart();
@@ -787,10 +820,52 @@ void CAvaraGame::ResumeGame() {
 
         // while(statusRequest == kPlayingStatus)
         //    GameTick();
+#endif /* __EMSCRIPTEN__ */
     }
+#ifdef __EMSCRIPTEN__
+    return doStart;
+}
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
     // SetPort(itsWindow);
     // InvalRect(&itsWindow->portRect);
+#else /* __EMSCRIPTEN__ */
+// The browser's start: ResumeGame's two waits (everyone ready, then everyone's
+// configuration) as phases, advanced each refresh while packets come in between.
+void CAvaraGame::PollStart() {
+    if (startPhase == kStartIdle)
+        return;
+    if (startPhase == kStartGathering) {
+        if (!itsNet->PollGatherPlayers())
+            return;
+        startPhase = kStartIdle;
+        Boolean doStart = itsNet->FinishGatherPlayers(startFreshMission);
+        if (!StartAfterGather(doStart, startFreshMission)) {
+            itsNet->StartFinished();
+            return;
+        }
+        GameStartPrepare();
+        if (itsNet->BeginResumeGame()) {
+            startPhase = kStartSyncing;
+        }
+        // else no vehicle: nothing to wait for, finish now
+    }
+    if (startPhase == kStartSyncing) {
+        if (!itsNet->PollResumeGame())
+            return;
+        startPhase = kStartIdle;
+        itsNet->FinishResumeGame();
+    }
+    GameStartFinish();
+    GameTick();
+    itsNet->StartFinished();
+    if (statusRequest != kPlayingStatus && gameStatus == kPlayingStatus) {
+        // The configurations never all arrived, or we have no vehicle. The desktop would
+        // sit in a game that cannot tick; stop it, so the menus come back.
+        GameStop();
+    }
+#endif /* __EMSCRIPTEN__ */
 }
 
 bool CAvaraGame::IsPlaying() {
@@ -799,14 +874,31 @@ bool CAvaraGame::IsPlaying() {
 
 // Run when the game is started or resumed
 void CAvaraGame::GameStart() {
+#ifdef __EMSCRIPTEN__
+    GameStartPrepare();
+    itsNet->ResumeGame();
+    GameStartFinish();
+}
+
+void CAvaraGame::GameStartPrepare() {
+#endif /* __EMSCRIPTEN__ */
     SDL_Log("CAvaraGame::GameStart\n");
     didWait = false;
     longWait = false;
 
     topSentFrame = FramesFromNow(-1);
+#ifdef __EMSCRIPTEN__
+    pollFrameNumber = -1;
+#endif /* __EMSCRIPTEN__ */
 
     statusRequest = kPlayingStatus;
+#ifndef __EMSCRIPTEN__
     itsNet->ResumeGame();
+#else /* __EMSCRIPTEN__ */
+}
+
+void CAvaraGame::GameStartFinish() {
+#endif /* __EMSCRIPTEN__ */
     scoreKeeper->PlayerIntros();
 
     gameStatus = kPlayingStatus;
@@ -884,6 +976,9 @@ void CAvaraGame::GameStop() {
 
     scoreKeeper->StopPause(gameStatus == kPauseStatus);
 
+#ifdef __EMSCRIPTEN__
+
+#endif /* __EMSCRIPTEN__ */
     itsNet->UngatherPlayers();
 
     // event wait timeout used by mainloop()
@@ -903,6 +998,13 @@ bool CAvaraGame::GameTick() {
     // No matter what, process any pending network packets
     itsNet->ProcessQueue();
 
+#ifdef __EMSCRIPTEN__
+    if (startPhase != kStartIdle) {
+        PollStart();
+        return false;
+    }
+
+#endif /* __EMSCRIPTEN__ */
     if (frameStart > nextPingTime) {
         // 3 pings every second, 1 ping used by each client for RTT calc (last ping not used)
         static uint32_t pingInterval = 1000; // msec
@@ -915,9 +1017,19 @@ bool CAvaraGame::GameTick() {
         return false;
 
     // Not time to process the next frame yet
+#ifndef __EMSCRIPTEN__
     if (frameStart < nextScheduledFrame)
+#else /* __EMSCRIPTEN__ */
+    if (externalPacing ? !tickAllowed : frameStart < nextScheduledFrame)
+#endif /* __EMSCRIPTEN__ */
         return false;
 
+#ifdef __EMSCRIPTEN__
+    // In the browser, a frame only starts once every player's input for it is here.
+    if (externalPacing && !RemoteFramesReady())
+        return false;
+
+#endif /* __EMSCRIPTEN__ */
     // SDL_Log("CAvaraGame::GameTick frame=%d dt=%d start=%d end=%d\n", frameNumber, SDL_GetTicks() - lastFrameTime,
     // frameStart, endTime); lastFrameTime = SDL_GetTicks();
 
@@ -928,13 +1040,24 @@ bool CAvaraGame::GameTick() {
     oldPlayersStanding = playersStanding;
     oldTeamsStanding = teamsStanding;
 
+#ifndef __EMSCRIPTEN__
     didWait = false;
     longWait = false;
     veryLongWait = false;
+#else /* __EMSCRIPTEN__ */
+    if (!externalPacing) {  // RemoteFramesReady reset these when it began this frame
+        didWait = false;
+        longWait = false;
+        veryLongWait = false;
+        preSendCount = 2;
+    }
+#endif /* __EMSCRIPTEN__ */
     playersStanding = 0;
     teamsStanding = 0;
     teamsStandingMask = 0;
+#ifndef __EMSCRIPTEN__
     preSendCount = 2;
+#endif /* __EMSCRIPTEN__ */
 
     ViewControl(); // This was called by itsApp->theGameWind->DoUpdate() calling RefreshWindow
 
@@ -964,7 +1087,15 @@ bool CAvaraGame::GameTick() {
     timeInSeconds = frameNumber * frameTime / 1000;
 
     // if the game hasn't kept up with the frame schedule, reset the next frame time (prevents chipmunk mode, unless player is dead)
+#ifndef __EMSCRIPTEN__
     if (nextScheduledFrame < frameStart && itsNet->IAmAlive()) {
+#else /* __EMSCRIPTEN__ */
+    if (externalPacing) {
+        // The pacer owns the schedule; keep nextScheduledFrame meaning "when the next frame
+        // is due" for PreSendFrameActions.
+        nextScheduledFrame = frameStart + frameTime;
+    } else if (nextScheduledFrame < frameStart && itsNet->IAmAlive()) {
+#endif /* __EMSCRIPTEN__ */
         // at the start of this frame we were ALREADY a full frame or more behind...
         // the further back we can stay, the closer we are to original frame rate, the better it is for
         // smoothness.  But that has to be weighed against micro-jitter.  Ideally we want to minimze the
@@ -987,6 +1118,54 @@ bool CAvaraGame::GameTick() {
     if (statusRequest != kPlayingStatus)
         GameStop();
 
+#ifdef __EMSCRIPTEN__
+    return true;
+}
+
+// Lockstep without blocking.
+//
+// On the desktop, a frame that needs a remote player's input waits for it inside
+// CPlayerManager::GetFunctions, spinning on the socket. A browser tab cannot do that:
+// DataChannel messages are only delivered once we return to the browser, so the spin
+// would wait out its whole timeout and nothing would ever arrive. Instead the frame is not
+// started until every input it will read is here. Each browser refresh asks again; while
+// waiting, each player's PollFrame does what one pass of the old wait loop did.
+//
+// Same frames, same inputs, same order as the desktop: only where the waiting happens
+// moved, from the middle of the frame to before it.
+bool CAvaraGame::RemoteFramesReady() {
+    if (pollFrameNumber != frameNumber) {
+        pollFrameNumber = frameNumber;
+        didWait = false;
+        longWait = false;
+        veryLongWait = false;
+        preSendCount = 2;
+    }
+
+    // Our own input goes out first, as RunFrameActions would send it: the other players
+    // may be waiting on this frame from us.
+    while (topSentFrame <= FramesFromNow(latencyTolerance)) {
+        itsNet->FrameAction();
+    }
+
+    // The players whose input PlayerAction will read this frame (see CAbstractPlayer::PlayerAction).
+    bool ready = true;
+    for (CAbstractPlayer *p = playerList; p; p = p->nextPlayer) {
+        if (p->isOut || p->netDestruct || !p->itsManager)
+            continue;
+        if (!p->itsManager->PollFrame())
+            ready = false;
+    }
+
+    if (statusRequest != kPlayingStatus) {  // waited too long, or the player aborted
+        GameStop();
+        return false;
+    }
+    if (!ready) {
+        PreSendFrameActions();
+        return false;
+    }
+#endif /* __EMSCRIPTEN__ */
     return true;
 }
 

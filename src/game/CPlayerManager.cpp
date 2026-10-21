@@ -602,6 +602,72 @@ void CPlayerManagerImpl::SendResendRequest(short askCount) {
     }
 }
 
+#ifdef __EMSCRIPTEN__
+bool CPlayerManagerImpl::PollFrame() {
+    static int ASK_INTERVAL = MSEC_TO_TICK_COUNT(500);
+    static int WAITING_MESSAGE_COUNT = 4;
+    FrameNumber fn = itsGame->frameNumber;
+    short i = (FUNCTIONBUFFERS - 1) & fn;
+
+    // Here, or newer (the buffer wrapped: GetFunctions gives up on the game), or a player
+    // who is completely done and no longer sends.
+    if (frameFuncs[i].validFrame >= fn || IsDeadOrDone()) {
+        if (waitFrame == fn) {
+            // The frame we were waiting on arrived: what GetFunctions does after its loop.
+            if (waitAskCount >= WAITING_MESSAGE_COUNT && frameFuncs[i].validFrame == fn) {
+                itsGame->itsApp->AddMessageLine("...resuming game", MsgAlignment::Center);
+                loadingStatus = waitOldStatus;
+            }
+            uint32_t waitTime = SDL_GetTicks() - waitStartMs;
+            itsGame->didWait = true;
+            if (waitTime >= itsGame->frameTime) {
+                if (waitTime > 3 * itsGame->frameTime || itsGame->longWait) {
+                    itsGame->veryLongWait = true;
+                }
+                itsGame->longWait = true;
+            }
+            waitFrame = -1;
+        }
+        return true;
+    }
+
+    long now = TickCount();
+    if (waitFrame != fn) {
+        waitFrame = fn;
+        waitAskCount = 0;
+        askAgainTime = now;
+        waitGiveUp = now + MSEC_TO_TICK_COUNT(15000);
+        waitStartMs = SDL_GetTicks();
+        waitOldStatus = loadingStatus;
+        if (frameFuncs[(FUNCTIONBUFFERS - 1) & (i + 1)].validFrame < fn) {
+            // if next frame hasn't arrived yet, don't ask for resend on this one RIGHT away
+            askAgainTime += 2 + (rand() & 3);
+        }
+    }
+
+    if (now - askAgainTime >= 0) {
+        SendResendRequest(waitAskCount++);
+        if (waitAskCount % 2 == 0) {
+            theNetManager->SkipLostPackets(1 << slot);
+        }
+        askAgainTime = now + ASK_INTERVAL;
+
+        if (waitAskCount == WAITING_MESSAGE_COUNT) {
+            DBG_Log("resend", "Waiting for '%s' to resend frame #%u\n", GetPlayerName().c_str(), fn);
+            loadingStatus = kLNetDelayed;
+            itsGame->itsApp->ParamLine(kmWaitingForPlayer, MsgAlignment::Center, playerName);
+            itsGame->itsApp->RenderContents();  // nothing else draws while we wait
+        }
+    }
+
+    if ((waitAskCount >= WAITING_MESSAGE_COUNT && TestKeyPressed(kfuAbortGame)) || now > waitGiveUp) {
+        itsGame->statusRequest = kAbortStatus;
+        waitFrame = -1;
+    }
+    return false;
+}
+
+#endif /* __EMSCRIPTEN__ */
 FunctionTable *CPlayerManagerImpl::GetFunctions() {
     // SDL_Log("CPlayerManagerImpl::GetFunctions, %u, %hd\n", itsGame->frameNumber, slot);
     FrameNumber ffi = (itsGame->frameNumber);
@@ -609,6 +675,16 @@ FunctionTable *CPlayerManagerImpl::GetFunctions() {
     static int ASK_INTERVAL = MSEC_TO_TICK_COUNT(500);
     static int WAITING_MESSAGE_COUNT = 4;
 
+#ifdef __EMSCRIPTEN__
+    // The browser cannot wait here: nothing arrives until we return to it. GameTick only
+    // runs a frame once PollFrame said every player's input is in, so a miss here means a
+    // player started needing input mid-frame. Use what we have rather than hang the tab.
+    if (frameFuncs[i].validFrame != itsGame->frameNumber && !IsDeadOrDone()) {
+        SDL_Log("GetFunctions: frame %u for slot %d not here (have %u); not waiting\n",
+                itsGame->frameNumber, slot, frameFuncs[i].validFrame);
+        return &frameFuncs[i].ft;
+    }
+#endif /* __EMSCRIPTEN__ */
     // don't wait for for players who are completely done (after last life and after limbo)
     if (frameFuncs[i].validFrame != itsGame->frameNumber && !IsDeadOrDone()) {
         long firstTime = askAgainTime = TickCount();

@@ -118,7 +118,14 @@ int main(int argc, char *argv[]) {
     std::string connectAddress;
     std::vector<std::string> textCommands;
     bool host = false;
+#ifndef __EMSCRIPTEN__
     std::vector<std::string> args = combinedArgs(app->Get<std::string>(kDefaultArgs), argc, argv);
+#else /* __EMSCRIPTEN__ */
+    // The desktop's default args load a random level at launch. In the browser that would
+    // download a random level set (up to 8 MB) on every page load, for a level the menu
+    // covers and Fort of Bob replaces a moment later. The page says what to load.
+    std::vector<std::string> args = combinedArgs("", argc, argv);
+#endif /* __EMSCRIPTEN__ */
     for (int i = 0; i < args.size(); i++) {
         std::string &arg = args[i];
         if (arg == "-p" || arg == "--port") {

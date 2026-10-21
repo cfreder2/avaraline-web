@@ -34,6 +34,17 @@
 #include "Beeper.h"
 
 #include "Debug.h"
+#ifdef __EMSCRIPTEN__
+#include "WebBridge.h"
+#include "LocalAssetRepository.h"
+#include <emscripten.h>
+// Is this level set's content here? The page (web/js/levels.js) answers, and starts
+// downloading it when it is not; it calls avara_web_set_ready once it is.
+EM_JS(int, avara_level_set_ready, (const char *set), {
+    if (typeof AvaraLevels === 'undefined') return 1;
+    return AvaraLevels.ready(UTF8ToString(set)) ? 1 : 0;
+});
+#endif /* __EMSCRIPTEN__ */
 #include <string.h>
 
 #define AUTOLATENCYPERIOD 3840  // msec (divisible by 64)
@@ -132,6 +143,10 @@ void CNetManager::ChangeNet(short netKind, std::string address, std::string pass
     Boolean confirm = true;
     //CAvaraApp *theApp = itsGame->itsApp;
 
+#ifdef __EMSCRIPTEN__
+    CancelPendingConnect();
+
+#endif /* __EMSCRIPTEN__ */
     if (netKind != netStatus || !isConnected) {
         if (netStatus != kNullNet || !isConnected) {
             if (isConnected) {
@@ -156,13 +171,27 @@ void CNetManager::ChangeNet(short netKind, std::string address, std::string pass
                     newManager = std::make_unique<CUDPComm>();
                     CUDPComm *theClient = (CUDPComm *)(newManager.get());
                     theClient->IUDPComm(kMaxAvaraPlayers - 1, TCPNETPACKETS, kAvaraNetVersion, itsGame->frameTime);
+#ifndef __EMSCRIPTEN__
                     theClient->Connect(address, password);
                     confirm = theClient->isConnected;
+#else /* __EMSCRIPTEN__ */
+                    // The handshake takes many browser frames; PollPendingConnect finishes it.
+                    theClient->ConnectAsync(address, password);
+                    if (theClient->rejectReason != noErr) {
+                        WebEvent("net", "{\"state\":\"failed\",\"reason\":" + std::to_string(theClient->rejectReason) + "}");
+                        newManager->Dispose();
+                        return;
+                    }
+                    pendingClient = std::move(newManager);
+                    WebEvent("net", "{\"state\":\"connecting\"}");
+                    return;
+#endif /* __EMSCRIPTEN__ */
                     break;
             }
         }
 
         if (confirm && newManager) {
+#ifndef __EMSCRIPTEN__
             PresenceType keepPresence = playerTable[itsCommManager->myId]->Presence();
             itsCommManager->Dispose();        // send kpPacketProtocolLogout message before being destroyed
             itsProtoControl->Detach();
@@ -181,6 +210,9 @@ void CNetManager::ChangeNet(short netKind, std::string address, std::string pass
                 // theRoster->InvalidateArea(kBottomBox, 0);
             }
             itsGame->itsApp->BroadcastCommand(kNetChangedCmd);
+#else /* __EMSCRIPTEN__ */
+            AdoptCommManager(netKind, newManager);
+#endif /* __EMSCRIPTEN__ */
         }
     } else {
         playerTable[itsCommManager->myId]->NetDisconnect();
@@ -190,9 +222,61 @@ void CNetManager::ChangeNet(short netKind, std::string address, std::string pass
     }
 }
 
+#ifdef __EMSCRIPTEN__
+void CNetManager::AdoptCommManager(short netKind, std::unique_ptr<CCommManager> &newManager) {
+    PresenceType keepPresence = playerTable[itsCommManager->myId]->Presence();
+    itsCommManager->Dispose();        // send kpPacketProtocolLogout message before being destroyed
+    itsProtoControl->Detach();
+    itsCommManager.swap(newManager);  // newManager takes place existing CCommManager which gets deleted when out of scope
+    playerTable[itsCommManager->myId]->SetPresence(keepPresence);
+    itsProtoControl->Attach(itsCommManager.get());
+    netStatus = netKind;
+    isConnected = true;
+    DisconnectSome(kdEveryone);
+
+    totalDistribution = 0;
+    DBG_Log("login", "sending kpLogin to server with presence=%d\n", keepPresence);
+    itsCommManager->SendPacket(kdServerOnly, kpLogin, 0, keepPresence, 0, 0L, NULL);
+    if (itsGame->loadedLevelInfo->levelName.length() > 0) {
+        itsGame->LevelReset(true);
+        // theRoster->InvalidateArea(kBottomBox, 0);
+    }
+    itsGame->itsApp->BroadcastCommand(kNetChangedCmd);
+
+    const char *state = netKind == kServerNet ? "hosting" : netKind == kClientNet ? "connected" : "offline";
+    WebEvent("net", std::string("{\"state\":\"") + state + "\",\"slot\":" + std::to_string(itsCommManager->myId) + "}");
+}
+
+void CNetManager::PollPendingConnect() {
+    if (!pendingClient) return;
+    CUDPComm *theClient = (CUDPComm *)pendingClient.get();
+    int result = theClient->PollContactServer();
+    if (result == 0) return;
+    if (result > 0) {
+        std::unique_ptr<CCommManager> newManager = std::move(pendingClient);
+        AdoptCommManager(kClientNet, newManager);
+    } else {
+        int reason = theClient->rejectReason;
+        pendingClient->Dispose();
+        pendingClient.reset();
+        WebEvent("net", "{\"state\":\"failed\",\"reason\":" + std::to_string(reason) + "}");
+    }
+}
+
+void CNetManager::CancelPendingConnect() {
+    if (!pendingClient) return;
+    pendingClient->Dispose();
+    pendingClient.reset();
+    WebEvent("net", "{\"state\":\"offline\",\"slot\":0}");
+}
+
+#endif /* __EMSCRIPTEN__ */
 void CNetManager::ProcessQueue() {
     long curTicks;
 
+#ifdef __EMSCRIPTEN__
+    PollPendingConnect();
+#endif /* __EMSCRIPTEN__ */
     itsCommManager->ProcessQueue();
 
     if (msgBuffer.size() > 0) {
@@ -490,6 +574,18 @@ void CNetManager::ReceiveLoadLevel(short senderSlot, int16_t originalSender, cha
         loaderSlot = originalSender;
         CPlayerManager *sendingPlayer = playerTable[originalSender].get();
 
+#ifdef __EMSCRIPTEN__
+        // The browser downloads a level set the first time one of its levels is played.
+        // Until it is here, the load waits; LevelSetFetched picks it up again. Everyone
+        // else waits for our kpLevelLoaded before the round can start, as they would for
+        // a slow disk.
+        if (!avara_level_set_ready(set.c_str())) {
+            pendingLoad = PendingLoad{true, senderSlot, originalSender, setAndTag, seed};
+            itsGame->itsApp->AddMessageLine("Downloading \"" + set + "\"...");
+            return;
+        }
+        pendingLoad.active = false;
+#endif /* __EMSCRIPTEN__ */
         theApp = itsGame->itsApp;
         FRandSeed = seed;
         iErr = theApp->LoadLevel(set, tag, sendingPlayer);
@@ -573,6 +669,18 @@ size_t CNetManager::SkipLostPackets(int16_t dist) {
 }
 
 Boolean CNetManager::GatherPlayers(Boolean isFreshMission) {
+#ifdef __EMSCRIPTEN__
+    BeginGatherPlayers();
+    // wait to hear from everyone, within time limit
+    while (!PollGatherPlayers()) {
+        // processes kpReadySynch messages coming from other players
+        ProcessQueue();
+    }
+    return FinishGatherPlayers(isFreshMission);
+}
+
+void CNetManager::BeginGatherPlayers() {
+#endif /* __EMSCRIPTEN__ */
     for (int i = 0; i < kMaxAvaraPlayers; i++) {
         // reset frame buffers
         playerTable[i]->ResumeGame();
@@ -581,11 +689,14 @@ Boolean CNetManager::GatherPlayers(Boolean isFreshMission) {
     readyPlayers = 0;
     readyPlayersConsensus = 0;
 
+#ifndef __EMSCRIPTEN__
     Boolean goAhead = false;
     uint64_t currentTime = TickCount();
     int loopCount = 0;
     uint64_t resendTime = currentTime;
+#endif /* __EMSCRIPTEN__ */
     static int READY_SYNC_PERIOD = MSEC_TO_TICK_COUNT(4.0*CLASSICFRAMETIME);  // rounds to 250ms
+#ifndef __EMSCRIPTEN__
     uint64_t timeLimit = currentTime + READY_SYNC_PERIOD*24;  // ~6sec
     // wait to hear from everyone, within time limit
     while (activePlayersDistribution != readyPlayersConsensus &&
@@ -609,12 +720,45 @@ Boolean CNetManager::GatherPlayers(Boolean isFreshMission) {
                 // (don't do this too often because it can cause you to lose frame 0... i think)
                 SkipLostPackets(distrib & ~readyPlayersConsensus);
             }
+#else /* __EMSCRIPTEN__ */
+    gatherTime = TickCount();
+    gatherLoopCount = 0;
+    gatherResendTime = gatherTime;
+    gatherTimeLimit = gatherTime + READY_SYNC_PERIOD*24;  // ~6sec
+}
+
+bool CNetManager::PollGatherPlayers() {
+    static int READY_SYNC_PERIOD = MSEC_TO_TICK_COUNT(4.0*CLASSICFRAMETIME);  // rounds to 250ms
+    gatherTime = TickCount();
+    if (activePlayersDistribution == readyPlayersConsensus || gatherTime >= gatherTimeLimit) {
+        return true;
+    }
+    if (gatherTime >= gatherResendTime) {
+        uint16_t distrib = activePlayersDistribution;
+        SDL_Log("CNetManager::GatherPlayers sending kpReadySynch to 0x%02x with readyPlayers = 0x%02x\n", distrib, readyPlayers);
+        itsCommManager->SendUrgentPacket(distrib, kpReadySynch, 0, readyPlayers, 0, 0, 0);
+        gatherResendTime += READY_SYNC_PERIOD;
+        if ((++gatherLoopCount % 5) == 0) {
+            // occasionally, skip lost packets on the connections who don't agree with consensus yet
+            // (don't do this too often because it can cause you to lose frame 0... i think)
+            SkipLostPackets(distrib & ~readyPlayersConsensus);
+#endif /* __EMSCRIPTEN__ */
         }
+#ifndef __EMSCRIPTEN__
         // processes kpReadySynch messages coming from other players
         ProcessQueue();
         currentTime = TickCount();
+#endif /* __EMSCRIPTEN__ */
     }
+#ifdef __EMSCRIPTEN__
+    return false;
+}
+#endif /* __EMSCRIPTEN__ */
 
+#ifdef __EMSCRIPTEN__
+Boolean CNetManager::FinishGatherPlayers(Boolean isFreshMission) {
+    Boolean goAhead = false;
+#endif /* __EMSCRIPTEN__ */
     if (activePlayersDistribution == readyPlayersConsensus) {
         // everybody agrees, all active players are ready (normal/good case)
         goAhead = true;
@@ -657,11 +801,27 @@ void CNetManager::UngatherPlayers() {
 }
 
 void CNetManager::ResumeGame() {
+#ifndef __EMSCRIPTEN__
     short i;
+#else /* __EMSCRIPTEN__ */
+    if (BeginResumeGame()) {
+        //	Synchronize players:
+        // process packets until we receive all the kpStartSynch messages (with kLActive status)
+        while (!PollResumeGame()) {
+            ProcessQueue();
+        }
+        FinishResumeGame();
+    }
+}
+
+bool CNetManager::BeginResumeGame() {
+#endif /* __EMSCRIPTEN__ */
     Point tempPoint;
     CPlayerManager *thePlayerManager;
+#ifndef __EMSCRIPTEN__
     long lastTime;
     Boolean notReady;
+#endif /* __EMSCRIPTEN__ */
 
     SDL_Log("CNetManager::ResumeGame\n");
 
@@ -694,12 +854,26 @@ void CNetManager::ResumeGame() {
         itsCommManager->SendUrgentPacket(
             kdEveryone, kpStartSynch, 0, kLActive, FRandSeed, sizeof(PlayerConfigRecord), (Ptr)&copy);
 
+#ifndef __EMSCRIPTEN__
         //	Synchronize players:
         lastTime = TickCount();
         notReady = true;
         do {
             short statusTest;
+#else /* __EMSCRIPTEN__ */
+        resumeStartTime = TickCount();
+        resumeNotReady = true;
+        return true;
+    } else {
+        itsCommManager->SendUrgentPacket(kdEveryone, kpRemoveMeFromGame, 0, 0, 0, 0, 0);
+        itsGame->statusRequest = kNoVehicleStatus;
+        // SysBeep(10);
+        return false;
+    }
+}
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             statusTest = 0;
             for (i = 0; i < kMaxAvaraPlayers; i++) {
                 // mark which players we have received kLActive from
@@ -707,17 +881,47 @@ void CNetManager::ResumeGame() {
                     statusTest |= 1 << i;
                 }
             }
+#else /* __EMSCRIPTEN__ */
+bool CNetManager::PollResumeGame() {
+    short statusTest = 0;
+    for (short i = 0; i < kMaxAvaraPlayers; i++) {
+        // mark which players we have received kLActive from
+        if (playerTable[i]->LoadingStatus() == kLActive) {
+            statusTest |= 1 << i;
+        }
+    }
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             // have we received kLActive from everyone who's playing?
             if ((statusTest & activePlayersDistribution) == activePlayersDistribution) {
                 notReady = false;
             }
+#else /* __EMSCRIPTEN__ */
+    // have we received kLActive from everyone who's playing?
+    if ((statusTest & activePlayersDistribution) == activePlayersDistribution) {
+        resumeNotReady = false;
+        return true;
+    }
+    // TODO: waiting for players dialog with cancel
+    return TickCount() - resumeStartTime >= 1800;
+}
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             // process packets until we receive all the kpStartSynch messages (with kLActive status)
             ProcessQueue();
             // Do we need this?
             // itsGame->itsApp->DoUpdate();
+#else /* __EMSCRIPTEN__ */
+void CNetManager::FinishResumeGame() {
+    bool ignoreCustomColors = itsGame->itsApp->Get(kIgnoreCustomColorsTag);
+    for (short i = 0; i < kMaxAvaraPlayers; i++) {
+        if (activePlayersDistribution & (1 << i)) {
+            DoConfig(i);
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
             // TODO: waiting for players dialog with cancel
         } while (TickCount() - lastTime < 1800 && notReady);
 
@@ -733,10 +937,24 @@ void CNetManager::ResumeGame() {
                     !playerTable[i]->GetPlayer()->hasTeammates) {
                     playerTable[i]->SpecialColorControl();
                 }
+#else /* __EMSCRIPTEN__ */
+            if (!ignoreCustomColors &&
+                itsGame->frameNumber == 0 &&
+                playerTable[i]->GetPlayer() &&
+                !playerTable[i]->GetPlayer()->didIncarnateMasked &&
+                !playerTable[i]->GetPlayer()->hasTeammates) {
+                playerTable[i]->SpecialColorControl();
+#endif /* __EMSCRIPTEN__ */
             }
         }
+#ifndef __EMSCRIPTEN__
         DoServerConfig();
+#else /* __EMSCRIPTEN__ */
+    }
+    DoServerConfig();
+#endif /* __EMSCRIPTEN__ */
 
+#ifndef __EMSCRIPTEN__
         ProcessQueue();
         if (notReady) { // SysBeep(10);
             SDL_Log("NOT READY\n");
@@ -746,9 +964,25 @@ void CNetManager::ResumeGame() {
         itsCommManager->SendUrgentPacket(kdEveryone, kpRemoveMeFromGame, 0, 0, 0, 0, 0);
         itsGame->statusRequest = kNoVehicleStatus;
         // SysBeep(10);
+#else /* __EMSCRIPTEN__ */
+    ProcessQueue();
+    if (resumeNotReady) { // SysBeep(10);
+        SDL_Log("NOT READY\n");
+        itsGame->statusRequest = kAbortStatus;
+#endif /* __EMSCRIPTEN__ */
     }
 }
 
+#ifdef __EMSCRIPTEN__
+void CNetManager::StartFinished() {
+    if (pendingStartLT < 0) return;
+    uint8_t fl = (pendingStartLT == kPendingLTCurrent) ? itsGame->FrameLatency() : (uint8_t)pendingStartLT;
+    pendingStartLT = -1;
+    SetLT(fl);
+    SDL_Log("Started with LT = %.2lf\n", itsGame->latencyTolerance);
+}
+
+#endif /* __EMSCRIPTEN__ */
 void CNetManager::HandleEvent(SDL_Event &event) {
     playerTable[itsCommManager->myId]->HandleEvent(event);
 }
@@ -1023,6 +1257,22 @@ void CNetManager::SendPingCommand(int pingTrips) {
                                kpPing, 0, 0, pingTrips-1, 0, NULL);
 }
 
+#ifdef __EMSCRIPTEN__
+void CNetManager::LevelSetFetched(std::string set, bool ok) {
+    // A set that was not there when the engine started (a community level) has to be
+    // added to the list of packages before it can be loaded.
+    if (ok) LocalAssetRepository::GetInstance()->Refresh();
+    if (!pendingLoad.active) return;
+    std::string wanted = pendingLoad.setAndTag.substr(0, pendingLoad.setAndTag.find("/"));
+    if (wanted != set) return;   // a newer load replaced it
+    PendingLoad p = pendingLoad;
+    pendingLoad.active = false;
+    // Run the load again. If the download failed, the page now says the set is "ready"
+    // once, so the load goes ahead, fails, and tells the others with kpLevelLoadErr.
+    ReceiveLoadLevel(p.senderSlot, p.originalSender, (char *)p.setAndTag.c_str(), p.seed);
+}
+
+#endif /* __EMSCRIPTEN__ */
 bool CNetManager::CanPlay() {
    return (!isPlaying && !playerTable[itsCommManager->myId]->IsAway());
 }
@@ -1095,10 +1345,19 @@ void CNetManager::ReceiveStartLevel(uint16_t activeDistribution, uint8_t initial
 
         itsGame->itsApp->DoCommand(kGetReadyToStartCmd);
         isPlaying = true;
+#ifdef __EMSCRIPTEN__
+        pendingStartLT = initialFL;
+#endif /* __EMSCRIPTEN__ */
         itsGame->ResumeGame();
+#ifndef __EMSCRIPTEN__
 
         SetLT(initialFL);
         SDL_Log("Start with LT = %.2lf\n", itsGame->latencyTolerance);
+#else /* __EMSCRIPTEN__ */
+        // On the desktop the start has happened by now; in the browser it finishes over the
+        // next frames and StartFinished runs then.
+        if (!itsGame->externalPacing) StartFinished();
+#endif /* __EMSCRIPTEN__ */
     }
 }
 
@@ -1131,11 +1390,19 @@ void CNetManager::ReceiveResumeLevel(uint16_t activeDistribution, Fixed randomKe
     if (CanPlay() && randomKey == FRandSeed) {
         itsGame->itsApp->DoCommand(kGetReadyToStartCmd);
         isPlaying = true;
+#ifndef __EMSCRIPTEN__
         itsGame->ResumeGame();
 
+#endif /* __EMSCRIPTEN__ */
         // if the server changes LT or AutoLT mode, this makes sure we use the correct LT
+#ifndef __EMSCRIPTEN__
         SetLT(itsGame->FrameLatency());
         SDL_Log("Resume with LT = %.2lf\n", itsGame->latencyTolerance);
+#else /* __EMSCRIPTEN__ */
+        pendingStartLT = kPendingLTCurrent;
+        itsGame->ResumeGame();
+        if (!itsGame->externalPacing) StartFinished();
+#endif /* __EMSCRIPTEN__ */
     }
 }
 
