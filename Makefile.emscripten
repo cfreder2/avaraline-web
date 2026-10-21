@@ -13,6 +13,9 @@ CXX = em++
 CC  = emcc
 
 BUILD_DIR ?= build_web
+# Node for the level packer. tools/build.mjs passes its own path: the emsdk puts its folder
+# first on PATH, and the "node" directory inside it stops make finding the program.
+NODE ?= node
 MKDIR_P   ?= mkdir -p
 
 # --- Sources ---------------------------------------------------------------
@@ -95,7 +98,7 @@ all: version $(TARGET) pagejs
 # set names have spaces, which make cannot list as prerequisites) and rewrites index.json
 # only when what it preloads changed, so the page relinks only then.
 $(BUILD_DIR)/levels/index.json: FORCE
-	@node tools/pack_levels.mjs levels $(BUILD_DIR)
+	@$(NODE) tools/pack_levels.mjs levels $(BUILD_DIR)
 FORCE:
 
 pagejs:
