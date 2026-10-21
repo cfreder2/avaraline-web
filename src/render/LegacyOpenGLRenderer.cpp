@@ -654,7 +654,13 @@ void LegacyOpenGLRenderer::SetPositions(OpenGLShader &shader)
 
 void LegacyOpenGLRenderer::SetTransforms(const CBSPPart &part)
 {
+#ifndef __EMSCRIPTEN__
     glm::mat4 m = ToFloatMat(part.modelTransform);
+#else /* __EMSCRIPTEN__ */
+    Matrix model;
+    part.DrawTransform(model);      // between a classic-only actor's updates, blended
+    glm::mat4 m = ToFloatMat(model);
+#endif /* __EMSCRIPTEN__ */
     if (part.hasScale) {
         glm::vec3 sc = glm::vec3(
             ToFloat(part.scale[0]),
@@ -666,9 +672,15 @@ void LegacyOpenGLRenderer::SetTransforms(const CBSPPart &part)
 
     glm::mat3 normalMat = glm::mat3(1.0f);
     for (int i = 0; i < 3; i ++) {
+#ifndef __EMSCRIPTEN__
         normalMat[0][i] = ToFloat((part.modelTransform)[0][i]);
         normalMat[1][i] = ToFloat((part.modelTransform)[1][i]);
         normalMat[2][i] = ToFloat((part.modelTransform)[2][i]);
+#else /* __EMSCRIPTEN__ */
+        normalMat[0][i] = ToFloat(model[0][i]);
+        normalMat[1][i] = ToFloat(model[1][i]);
+        normalMat[2][i] = ToFloat(model[2][i]);
+#endif /* __EMSCRIPTEN__ */
     }
 
     worldShader->Use();

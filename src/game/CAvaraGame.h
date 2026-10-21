@@ -84,6 +84,9 @@ public:
     int32_t timeInSeconds;
     FrameNumber frameNumber;
     bool isClassicFrame;
+#ifdef __EMSCRIPTEN__
+    int framesSinceClassic = 0;   // for drawing classic-only actors between updates
+#endif /* __EMSCRIPTEN__ */
     int32_t frameAdjust;
 
     int currentGameId = 0; // resets when a new game starts

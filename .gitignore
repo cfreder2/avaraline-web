@@ -24,3 +24,6 @@ Avara.msvc/Avara*/
 Avara.msvc/Tests/
 compile_commands.json
 *.vcxproj.user
+
+# The browser build staged for GitHub Pages by tools/build.mjs
+dist/

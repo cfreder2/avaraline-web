@@ -1,0 +1,50 @@
+name: Browser build to GitHub Pages
+
+# The playable browser build: make -f Makefile.emscripten, staged into dist/ by tools/build.mjs
+# (the wasm, the page and its scripts, the level packs), published to GitHub Pages.
+
+on:
+  push:
+    branches: [site]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.0
+          actions-cache-folder: emsdk-cache
+      - run: emcc --version
+      - run: node tools/build.mjs --label "r${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+      - name: Report what ships
+        run: find dist -type f -printf '%10s  %p\n' | sort -k2 | tail -40
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  pages:
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -64,7 +64,11 @@ Boolean CProtoControl::DelayedPacketHandler(PacketInfo *thePacket) {
 
     switch (thePacket->command) {
         case kpKillConnection:
+#ifndef __EMSCRIPTEN__
             theNet->HandleDisconnect(thePacket->p1, 0);
+#else /* __EMSCRIPTEN__ */
+            theNet->HandleDisconnect(thePacket->p1, thePacket->p2);   // p2: kpPacketProtocolLogout when the server left
+#endif /* __EMSCRIPTEN__ */
             break;
         //	case kpError:
         case kpDisconnect:

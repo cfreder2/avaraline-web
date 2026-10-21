@@ -495,6 +495,10 @@ void CNetManager::HandleDisconnect(short slotId, short why) {
     itsCommManager->DisconnectSlot(slotId);
 
     if (slotId == itsCommManager->myId) {
+#ifdef __EMSCRIPTEN__
+        // kicked, or the host left: the page says which
+        WebEvent("removed", "{\"why\":" + std::to_string(why) + ",\"hostLeft\":" + (why == kpPacketProtocolLogout ? "true" : "false") + "}");
+#endif /* __EMSCRIPTEN__ */
         isConnected = false;
         netOwner = NULL;
         DisconnectSome(kdEveryone);
@@ -596,6 +600,10 @@ void CNetManager::ReceiveLoadLevel(short senderSlot, int16_t originalSender, cha
         aPacket->p1 = 0;
         aPacket->p3 = 0;
         if (iErr) {
+#ifdef __EMSCRIPTEN__
+            WebEvent("levelerr", "{\"set\":" + WebJsonString(set) + ",\"tag\":" + WebJsonString(tag) +
+                                 ",\"err\":" + std::to_string(iErr) + "}");
+#endif /* __EMSCRIPTEN__ */
             aPacket->command = kpLevelLoadErr;
             aPacket->p2 = iErr;
             //itsCommManager->SendPacket(kdEveryone, kpLevelLoadErr, 0, iErr, 0, 0, 0);

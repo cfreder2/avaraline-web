@@ -29,6 +29,9 @@
 #include "Preferences.h"
 #include "System.h"
 #include "Debug.h"
+#ifdef __EMSCRIPTEN__
+#include "WebBridge.h"
+#endif /* __EMSCRIPTEN__ */
 
 #include <SDL2/SDL.h>
 #include <utf8.h>
@@ -869,6 +872,10 @@ void CPlayerManagerImpl::RosterMessageText(short len, const char *c) {
             case 13:
                 // ¬
                 ((CAvaraAppImpl*)itsGame->itsApp)->rosterWindow->NewChatLine(playerName, slot, chatText);
+#ifdef __EMSCRIPTEN__
+                WebEvent("chat", "{\"slot\":" + std::to_string(slot) + ",\"name\":" + WebJsonString(GetPlayerName()) +
+                                 ",\"text\":" + WebJsonString(chatText) + "}");
+#endif /* __EMSCRIPTEN__ */
 
                 lineBuffer.insert(lineBuffer.end(), lThing_utf8, lThing_utf8 + strlen(lThing_utf8));
                 // FlushMessageText(true);
@@ -1177,6 +1184,16 @@ void CPlayerManagerImpl::SetPlayerReady(bool isReady) {
         itsGame->StartIfReady();
     } else if (loadingStatus == kLReady && !isReady) {
         loadingStatus = prevState;
+#ifdef __EMSCRIPTEN__
+    } else if (isReady && loadingStatus == kLConnected && slot == theNetManager->itsCommManager->myId) {
+        // ready with nothing loaded used to do nothing at all; say why (once in a while:
+        // every character of a message ending in a checkmark comes through here)
+        static uint32_t lastHint = 0;
+        if (SDL_GetTicks() - lastHint > 2000) {
+            lastHint = SDL_GetTicks();
+            itsGame->itsApp->AddMessageLine("No level loaded yet: pick one in the Levels window and click Load Level.");
+        }
+#endif /* __EMSCRIPTEN__ */
     }
 }
 
