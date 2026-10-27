@@ -161,6 +161,16 @@ public:
     Matrix modelViewTransform = {{0}}; // modelview
     Matrix invModelViewTransform = {{0}}; // inverse modelview
 
+    // Drawing between updates (only the renderers read these; the game never does). An
+    // actor that runs only on classic (64 ms) frames moves in 15 Hz jumps when frames are
+    // 16 ms; it is drawn blended from where its parts were before its last update to where
+    // they are, a step further each frame. CAvaraGame::RunActorFrameActions sets them.
+    Matrix prevModelTransform = {{0}};
+    bool blendOn = false;
+    static Fixed blend;                 // this frame: how far from the previous pose, FIX1 = all the way
+    void RememberPose() { MATRIXCOPY(prevModelTransform, modelTransform); blendOn = true; }
+    void DrawTransform(Matrix &m) const;   // modelTransform, blended
+
     Fixed hither = FIX3(500); // 50 cm
     Fixed yon = FIX(500);     // 500 m
     Fixed extraAmbient = 0;

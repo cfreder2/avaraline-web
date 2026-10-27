@@ -32,6 +32,25 @@ Vector **bspPointTemp = 0;
 
 ARGBColor ***bspColorLookupTable = 0;
 
+Fixed CBSPPart::blend = FIX1;
+
+void CBSPPart::DrawTransform(Matrix &m) const {
+    MATRIXCOPY(m, modelTransform);
+    if (!blendOn || blend >= FIX1) return;
+    // a jump (teleported, placed anew) or a turn of more than ~45 degrees in one update is
+    // drawn where it is: blending across it would slide through walls or shrink the part
+    for (int i = 0; i < 3; i++)
+        if (std::abs(modelTransform[3][i] - prevModelTransform[3][i]) > FIX(4)) return;
+    for (int r = 0; r < 3; r += 2) {
+        Fixed dot = FMul(modelTransform[r][0], prevModelTransform[r][0]) + FMul(modelTransform[r][1], prevModelTransform[r][1]) +
+                    FMul(modelTransform[r][2], prevModelTransform[r][2]);
+        if (dot < FIX3(700)) return;
+    }
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 3; c++)
+            m[r][c] = prevModelTransform[r][c] + FMul(modelTransform[r][c] - prevModelTransform[r][c], blend);
+}
+
 CBSPPart *CBSPPart::Create(short resId) {
     CBSPPart *part = new CBSPPart;
     part->IBSPPart(resId);
