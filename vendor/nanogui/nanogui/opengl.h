@@ -17,6 +17,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
+#ifndef __EMSCRIPTEN__
 #if defined(NANOGUI_GLAD)
     #if defined(NANOGUI_SHARED) && !defined(GLAD_GLAPI_EXPORT)
         #define GLAD_GLAPI_EXPORT
@@ -26,6 +27,11 @@
     #endif
     #include <glad/glad.h>
 #endif
+#else /* __EMSCRIPTEN__ */
+    // WebGL2 == OpenGL ES 3.0; functions are linked directly, no GLAD loader.
+    #include <GLES3/gl3.h>
+    #include <GLES3/gl2ext.h>
+#endif /* __EMSCRIPTEN__ */
 #endif // DOXYGEN_SHOULD_SKIP_THIS
 
 #include <nanovg.h>

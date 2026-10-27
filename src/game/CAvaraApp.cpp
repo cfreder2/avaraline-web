@@ -20,7 +20,9 @@
 #include "CNetManager.h"
 #include "CNetManager.h" // version.net
 #include "CRC.h"
+#ifndef __EMSCRIPTEN__
 #include "CRUDsqlite.h"
+#endif /* __EMSCRIPTEN__ */
 #include "CSoundMixer.h"
 #include "CViewParameters.h"
 #include "CharWordLongPointer.h"
@@ -38,10 +40,80 @@
 #include "Preferences.h"
 #include "System.h"
 #include "Tags.h"
+#ifndef __EMSCRIPTEN__
 #include "httplib.h"
+#endif /* __EMSCRIPTEN__ */
 #include "NVGUtil.h"
 #include <glm/glm.hpp>
+#ifdef __EMSCRIPTEN__
+#include "CAbstractPlayer.h"
+#include "WebBridge.h"
+#include "DrawableSize.h"
+#include "CRUDnull.h"  // no-op persistence backend for the web build
+#include <emscripten.h>
+// One frame reached the screen; the page's FPS meter and auto render scale count these.
+// frame is the game's frame number (-1 in the menus), so ticks per second can be told
+// from frames drawn per second.
+EM_JS(void, avara_frame_mark, (int frame), { if (typeof Module !== 'undefined' && Module.onAvaraFrame) Module.onAvaraFrame(frame); });
+#endif /* __EMSCRIPTEN__ */
 
+#ifdef __EMSCRIPTEN__
+// How many sim ticks each requestAnimationFrame gets.
+//
+// The browser calls us once per display refresh, with some jitter in when. Avara draws a
+// frame only when it simulates one (there is no interpolation), so how ticks line up with
+// refreshes IS the smoothness. Two modes:
+//
+//  - Locked: when a whole number of refreshes is close to one tick (60, 120, 240 Hz
+//    displays), tick once every n refreshes, counted, not timed. Jitter in the callback
+//    time cannot move a tick to the wrong refresh, and a refresh the browser skipped is
+//    made up with an extra tick so the game keeps its speed.
+//  - Accumulated: other rates (75, 90, 144 Hz) and slow machines. Ticks come due from
+//    elapsed time, up to kMaxTicks per refresh, so a machine that can only draw 25 frames
+//    a second still plays at full speed instead of in slow motion.
+//
+// The tick period is the engine's frameTime stretched from 62.5 to 60 ticks a second, so
+// that every browser in a networked game runs at the same rate and none of them has to
+// stall for the others' frames (lockstep runs at the pace of the slowest peer).
+struct WebPacer {
+    static constexpr int kMaxTicks = 4;     // more than this per refresh and we are drowning
+    double rafMs = 1000.0 / 60.0;           // smoothed time between refreshes
+    double last = 0, acc = 0;
+    int phase = 0;
+    bool running = false;
+
+    void Reset() { running = false; }
+
+    int TicksDue(double now, double periodMs) {
+        double dt = last > 0 ? now - last : rafMs;
+        last = now;
+        if (!running) {                     // first refresh of a game or resume: tick now
+            running = true; phase = 0; acc = 0;
+            return 1;
+        }
+        if (dt > 0 && dt < 50) rafMs += (dt - rafMs) * 0.05;
+        int n = std::max(1, (int)std::lround(periodMs / rafMs));
+        if (std::fabs(n * rafMs - periodMs) < 0.06 * periodMs) {
+            int refreshes = std::max(1, (int)std::lround(dt / rafMs));
+            phase += std::min(refreshes, kMaxTicks * n);
+            int ticks = phase / n;
+            phase %= n;
+            return std::min(ticks, kMaxTicks);
+        }
+        acc += std::min(dt, kMaxTicks * periodMs);
+        int ticks = std::min((int)(acc / periodMs), kMaxTicks);
+        acc -= ticks * periodMs;
+        return ticks;
+    }
+
+    // The game could not advance (waiting on a remote frame, or it stopped): drop the
+    // debt rather than fast-forwarding through it afterwards.
+    void Stalled() { acc = 0; phase = 0; }
+};
+static WebPacer gPacer;
+static bool gWebHidden;   // set by avara_web_background
+
+#endif /* __EMSCRIPTEN__ */
 #include <chrono>
 #include <cmath>
 #include <json.hpp>
@@ -51,6 +123,7 @@
 
 std::mutex trackerLock;
 
+#ifndef __EMSCRIPTEN__
 void TrackerPinger(CAvaraAppImpl *app) {
     while (true) {
         if (app->Number(kTrackerRegister) == 1 && app->GetNet()->netStatus == kServerNet) {
@@ -75,6 +148,7 @@ void TrackerPinger(CAvaraAppImpl *app) {
     }
 }
 
+#endif /* __EMSCRIPTEN__ */
 SDL_GameController *FindGameController() {
     for (int i = 0; i < SDL_NumJoysticks(); i++) {
         if (SDL_IsGameController(i)) {
@@ -166,9 +240,16 @@ CAvaraAppImpl::CAvaraAppImpl() : CApplication("Avara") {
     
     itsGame = std::make_unique<CAvaraGame>(Get<FrameTime>(kFrameTimeTag));
     gCurrentGame = itsGame.get();
+#ifdef __EMSCRIPTEN__
+    itsGame->externalPacing = true;   // ticks are handed out by WebPacer in idle()
+#endif /* __EMSCRIPTEN__ */
 
     // use sqlite to persist stuff
+#ifndef __EMSCRIPTEN__
     itsAPI = std::make_unique<CRUDsqlite>();
+#else /* __EMSCRIPTEN__ */
+    itsAPI = std::make_unique<CRUDnull>();
+#endif /* __EMSCRIPTEN__ */
 
     if (mNVGContext) {
         ui = std::make_unique<CHUD>(gCurrentGame);
@@ -236,8 +317,10 @@ CAvaraAppImpl::CAvaraAppImpl() : CApplication("Avara") {
 
     nextTrackerUpdate = 0;
     trackerUpdatePending = false;
+#ifndef __EMSCRIPTEN__
     trackerThread = new std::thread(TrackerPinger, this);
     trackerThread->detach();
+#endif /* __EMSCRIPTEN__ */
 
     gameNet->ChangeNet(kNullNet, "");
 
@@ -262,6 +345,11 @@ CAvaraAppImpl::~CAvaraAppImpl() {
 }
 
 void CAvaraAppImpl::UpdateGUIState(GUIState g) {
+#ifdef __EMSCRIPTEN__
+    // The page has its own menus to host, join, find games and change settings, so in the
+    // browser the canvas only ever shows the level, roster and player windows.
+    g = GUIState::singlePlayer;
+#endif /* __EMSCRIPTEN__ */
     auto oldState = itsGUIState;
     if (g != GUIState::title &&
         g != GUIState::hostServer &&
@@ -270,7 +358,11 @@ void CAvaraAppImpl::UpdateGUIState(GUIState g) {
             UpdateGUIState(oldState);
             backButton->setVisible(false);
         });
+#ifndef __EMSCRIPTEN__
         backButton->setVisible(true);
+#else /* __EMSCRIPTEN__ */
+        backButton->setVisible(false);
+#endif /* __EMSCRIPTEN__ */
         backButton->setNeedsLayout();
     }
     else backButton->setVisible(false);
@@ -364,8 +456,35 @@ void CAvaraAppImpl::idle() {
         lastControllerEvent = procTime;
     }
 
+#ifndef __EMSCRIPTEN__
     if (itsGame->GameTick()) {
         RenderContents();
+#else /* __EMSCRIPTEN__ */
+    if (!itsGame->IsPlaying()) {
+        gPacer.Reset();
+        itsGame->tickAllowed = false;
+        itsGame->GameTick();                // network and pings only
+        itsGame->tickAllowed = true;        // a game starting from here runs its first tick
+    } else {
+        int due = gPacer.TicksDue(emscripten_get_now(), itsGame->frameTime * (62.5 / 60.0));
+        bool advanced = false;
+        // Always call once, so packets are processed on every refresh even when no frame
+        // is due.
+        for (int i = 0; i < std::max(due, 1); i++) {
+            itsGame->tickAllowed = i < due;
+            if (!itsGame->GameTick()) {
+                if (i < due) gPacer.Stalled();
+                break;
+            }
+            advanced = true;
+            if (!itsGame->IsPlaying()) break;
+        }
+        itsGame->tickAllowed = true;
+        if (advanced) {
+            if (!gWebHidden) RenderContents();
+            avara_frame_mark(itsGame->frameNumber);
+        }
+#endif /* __EMSCRIPTEN__ */
     }
     // output a coarse estimate of cpu time & percent every second when enabled
     if (curFrame > 1 && curFrame != itsGame->frameNumber && Debug::IsEnabled("cpu")) {
@@ -401,6 +520,25 @@ void CAvaraAppImpl::drawContents() {
 
 // display only the game screen, not the widgets
 void CAvaraAppImpl::RenderContents() {
+#ifdef __EMSCRIPTEN__
+    // The page scales the drawing buffer (render scale, F9 and automatic) without resizing
+    // the window, so no resize event says the ratio between them changed. The HUD lays
+    // itself out in window units through this ratio; a stale one put it off-screen.
+    {
+        int ww = 0, wh = 0, dw = 0, dh = 0;
+        SDL_GetWindowSize(mSDLWindow, &ww, &wh);
+        AvaraDrawableSize(mSDLWindow, &dw, &dh);
+        auto vp = gRenderer->viewParams;
+        float ratio = ww > 0 ? (float)dw / (float)ww : 1.0f;
+        if (ww > 0 && wh > 0 &&
+            (vp->viewPixelDimensions.h != ww || vp->viewPixelDimensions.v != wh || std::fabs(vp->viewPixelRatio - ratio) > 0.001f)) {
+            gRenderer->UpdateViewRect(ww, wh, ratio);
+        }
+        // Nothing else sets the viewport while a round is on (nanogui does, when it draws
+        // the menus), so a buffer scaled mid-round needs it set here.
+        glViewport(0, 0, dw, dh);
+    }
+#endif /* __EMSCRIPTEN__ */
     drawContents();
     gRenderer->RefreshWindow();
 }
@@ -460,6 +598,9 @@ void CAvaraAppImpl::drawAll() {
     if (!itsGame->IsPlaying()) {
         rosterWindow->UpdateRoster();
         CApplication::drawAll();
+#ifdef __EMSCRIPTEN__
+        avara_frame_mark(-1);
+#endif /* __EMSCRIPTEN__ */
     }
 }
 
@@ -765,3 +906,124 @@ void CAvaraAppImpl::SetIndicatorDisplay(short i, short v) {}
 void CAvaraAppImpl::NumberLine(long theNum, short align) {}
 void CAvaraAppImpl::DrawUserInfoPart(short i, short partList) {}
 void CAvaraAppImpl::BrightBox(FrameNumber frameNum, short position) {}
+#ifdef __EMSCRIPTEN__
+
+// ---------------------------------------------------------------------------------------
+// Called by the page (web/js/app.js) through Module.ccall. The menus are HTML; these are the
+// only ways it reaches into the game. Each returns at once: joining finishes later and is
+// reported through WebEvent("net", ...).
+// ---------------------------------------------------------------------------------------
+static CAvaraAppImpl *WebApp() { return (CAvaraAppImpl *)gApplication; }
+
+extern "C" {
+
+// Host a game: this tab becomes slot 0, and others reach it through the page's mesh.
+EMSCRIPTEN_KEEPALIVE void avara_web_host() {
+    WebApp()->GetNet()->ChangeNet(kServerNet, "");
+}
+
+// Join the game whose host's mesh id is peer ("peer:<hex>", see AvaraTCP_web.cpp).
+EMSCRIPTEN_KEEPALIVE void avara_web_join(const char *peer) {
+    WebApp()->GetNet()->ChangeNet(kClientNet, peer);
+}
+
+// A hidden tab gets no requestAnimationFrame, and Chrome slows its timers to a crawl; in
+// lockstep the others would all wait on us. So while hidden in a game with others, the
+// page pauses the rAF loop and drives avara_web_tick from a Web Worker, whose timers keep
+// time in a background tab. Nothing is drawn meanwhile (no one can see it).
+EMSCRIPTEN_KEEPALIVE void avara_web_background(int hidden) {
+    gWebHidden = hidden != 0;
+    if (gWebHidden) emscripten_pause_main_loop();
+    else emscripten_resume_main_loop();
+}
+
+// Back to playing alone: hosting stops, or the connection to the host closes.
+EMSCRIPTEN_KEEPALIVE void avara_web_leave() {
+    CNetManager *net = WebApp()->GetNet();
+    net->CancelPendingConnect();
+    if (net->netStatus != kNullNet) {
+        net->ChangeNet(kNullNet, "");
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE void avara_web_set_name(const char *name) {
+    std::string value(name);
+    if (value.empty() || value.size() > 31) return;
+    WebApp()->Set(kPlayerNameTag, value);
+    Str255 theName;
+    theName[0] = value.length();
+    BlockMoveData(value.c_str(), theName + 1, theName[0]);
+    WebApp()->GetNet()->NameChange(theName);
+}
+
+// The page finished downloading a level set (ok=0: it could not).
+EMSCRIPTEN_KEEPALIVE void avara_web_set_ready(const char *set, int ok) {
+    WebApp()->GetNet()->LevelSetFetched(set, ok != 0);
+}
+
+// Load a level by set and .alf, for everyone in the game (a client's request goes to
+// the host, which sends it to all, as the Levels window's Load button does).
+EMSCRIPTEN_KEEPALIVE void avara_web_load(const char *set, const char *alf) {
+    WebApp()->GetNet()->SendLoadLevel(set, alf);
+}
+
+// Set a preference from the page's Settings screen: value is JSON of the same type as the
+// preference has now (a mismatch is refused, as /pref refuses it). Applies it at once.
+EMSCRIPTEN_KEEPALIVE int avara_web_set_pref(const char *name, const char *value) {
+    std::string v(value);
+    std::string n(name);
+    json parsed;
+    try { parsed = json::parse(v); } catch (...) { return 0; }
+    if (parsed.is_string()) v = parsed.get<std::string>();   // Update() quotes strings itself
+    if (!WebApp()->Update(n, v)) return 0;
+    // new key bindings take effect at once, as after the Settings window's keyboard page
+    if (n == kKeyboardMappingTag) WebApp()->DoCommand(kKeyboardMappingReset);
+    return 1;
+}
+
+// Write the preferences file (the page keeps a copy in localStorage: the file system the
+// engine sees is gone when the tab closes).
+EMSCRIPTEN_KEEPALIVE void avara_web_save_prefs() {
+    WebApp()->SavePrefs();
+}
+
+// For harnesses: where the local player is, and the sizes the view uses, as JSON.
+EMSCRIPTEN_KEEPALIVE const char *avara_web_probe() {
+    static std::string out;
+    CAvaraGame *game = WebApp()->GetGame();
+    CAbstractPlayer *p = game ? game->GetLocalPlayer() : nullptr;
+    char buf[200];
+    if (p) snprintf(buf, sizeof buf, "{\"playing\":%d,\"frame\":%d,\"x\":%.3f,\"y\":%.3f,\"z\":%.3f,\"lives\":%d,\"out\":%d,\"freeView\":%d,\"spectating\":%d,\"limbo\":%d}",
+                    game->IsPlaying() ? 1 : 0, game->frameNumber,
+                    ToFloat(p->location[0]), ToFloat(p->location[1]), ToFloat(p->location[2]),
+                    p->lives, p->isOut ? 1 : 0, p->freeView ? 1 : 0, game->GetSpectatePlayer() != nullptr ? 1 : 0,
+                    p->isInLimbo ? (int)p->limboCount : -9999);
+    else snprintf(buf, sizeof buf, "{\"playing\":%d,\"frame\":%d}", game && game->IsPlaying() ? 1 : 0, game ? game->frameNumber : -1);
+    out = buf;
+    // sizes, for chasing render-scale trouble: window, drawable, the view's idea, GL viewport
+    int ww = 0, wh = 0, dw = 0, dh = 0;
+    SDL_GetWindowSize(WebApp()->sdlWindow(), &ww, &wh);
+    AvaraDrawableSize(WebApp()->sdlWindow(), &dw, &dh);
+    GLint vpt[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_VIEWPORT, vpt);
+    auto vp = gRenderer->viewParams;
+    char sz[200];
+    snprintf(sz, sizeof sz, ",\"win\":[%d,%d],\"draw\":[%d,%d],\"view\":[%d,%d],\"ratio\":%.3f,\"glvp\":[%d,%d]}",
+             ww, wh, dw, dh, (int)vp->viewPixelDimensions.h, (int)vp->viewPixelDimensions.v, vp->viewPixelRatio, vpt[2], vpt[3]);
+    out.pop_back();
+    out += sz;
+    return out.c_str();
+}
+
+// A text command, as typed in the roster's chat line ("/load clock").
+EMSCRIPTEN_KEEPALIVE void avara_web_command(const char *text) {
+    WebApp()->GetTui()->ExecuteMatchingCommand(text, CPlayerManagerImpl::LocalPlayer());
+}
+
+// A line in the message area from the page (a rating saved, an invitation sent).
+EMSCRIPTEN_KEEPALIVE void avara_web_message(const char *text) {
+    WebApp()->AddMessageLine(text);
+}
+
+}
+#endif /* __EMSCRIPTEN__ */

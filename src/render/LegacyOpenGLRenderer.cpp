@@ -1,7 +1,13 @@
 #include "LegacyOpenGLRenderer.h"
+#ifdef __EMSCRIPTEN__
+#include "DrawableSize.h"
+#endif /* __EMSCRIPTEN__ */
 
 #include "AssetManager.h"
 #include "ColorManager.h"
+#ifdef __EMSCRIPTEN__
+#include "Debug.h"
+#endif /* __EMSCRIPTEN__ */
 #include "FastMat.h"
 #include "OpenGLVertices.h"
 
@@ -73,10 +79,12 @@ const char *__glGetErrorString(GLenum error)
             return "Invalid Framebuffer Operation";
         case GL_OUT_OF_MEMORY:
             return "Out of Memory";
+#ifndef __EMSCRIPTEN__
         case GL_STACK_UNDERFLOW:
             return "Stack Underflow";
         case GL_STACK_OVERFLOW:
             return "Stack Overflow";
+#endif /* __EMSCRIPTEN__ */
         // case GL_CONTEXT_LOST:
         //     return "Context Lost";
         default:
@@ -86,6 +94,12 @@ const char *__glGetErrorString(GLenum error)
 
 void ___glCheckErrors(const char *filename, int line)
 {
+#ifdef __EMSCRIPTEN__
+    // In a browser glGetError is a round trip to the GPU process that waits for every
+    // command before it. Checked after each draw, it was 92% of the frame and held the
+    // game near 45 fps. Only when debugging GL (/dbg gl).
+    if (!Debug::IsEnabled("gl")) return;
+#endif /* __EMSCRIPTEN__ */
     GLenum err;
     while ((err = glGetError()) != GL_NO_ERROR)
         SDL_Log("OpenGL Error: %s (%d) [%u] %s\n", filename, line, err, __glGetErrorString(err));
@@ -109,7 +123,11 @@ LegacyOpenGLRenderer::LegacyOpenGLRenderer(SDL_Window *window) : AbstractRendere
     this->window = window;
 
     GLsizei w, h;
+#ifndef __EMSCRIPTEN__
     SDL_GL_GetDrawableSize(window, &w, &h);
+#else /* __EMSCRIPTEN__ */
+    AvaraDrawableSize(window, &w, &h);
+#endif /* __EMSCRIPTEN__ */
     viewParams->viewPixelDimensions.h = w;
     viewParams->viewPixelDimensions.v = h;
 
@@ -252,7 +270,11 @@ void LegacyOpenGLRenderer::ApplyPrefs(std::optional<std::string> name) {
 
 void LegacyOpenGLRenderer::ApplyProjection()
 {
+#ifndef __EMSCRIPTEN__
     SDL_GL_GetDrawableSize(this->window, &resolution[0], &resolution[1]);
+#else /* __EMSCRIPTEN__ */
+    AvaraDrawableSize(this->window, &resolution[0], &resolution[1]);
+#endif /* __EMSCRIPTEN__ */
 
     glm::mat4 proj = glm::scale(
         glm::perspective(
@@ -372,8 +394,10 @@ void LegacyOpenGLRenderer::RenderFrame()
 
     skyShader->Use();
 
+#ifndef __EMSCRIPTEN__
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+#endif /* __EMSCRIPTEN__ */
     // The count is in vertices (3 floats each), not bytes; a byte count reads far past the buffer.
     glDrawArrays(GL_TRIANGLE_STRIP, 0, sizeof(legacySkyboxVertices) / (sizeof(float) * 3));
     glDisableVertexAttribArray(0);

@@ -82,6 +82,13 @@ public:
 
     virtual void GameKeyPress(char c) = 0;
     virtual FunctionTable *GetFunctions() = 0;
+#ifdef __EMSCRIPTEN__
+    // Browser lockstep (see CAvaraGame::RemoteFramesReady): true when this frame's input
+    // is here or not needed. Otherwise one pass of GetFunctions' wait (resend requests,
+    // the waiting message, giving up after 15 s) and false, so the caller can give the
+    // thread back to the browser for the packet to arrive.
+    virtual bool PollFrame() = 0;
+#endif /* __EMSCRIPTEN__ */
     virtual void DeadOrDone() = 0;
     virtual bool IsDeadOrDone() = 0;
     virtual short Position() = 0;
@@ -166,6 +173,15 @@ private:
     short oldModifiers;
     long askAgainTime;
 
+#ifdef __EMSCRIPTEN__
+    // PollFrame's wait, carried across browser frames
+    FrameNumber waitFrame = -1;
+    short waitAskCount = 0;
+    long waitGiveUp = 0;
+    uint32_t waitStartMs = 0;
+    LoadingState waitOldStatus;
+
+#endif /* __EMSCRIPTEN__ */
     // Track current frame events here
     uint32_t keysDown, keysUp, keysHeld, dupKeysHeld;
     short mouseX, mouseY;
@@ -234,6 +250,9 @@ public:
     virtual void ViewControl();
 
     virtual FunctionTable *GetFunctions();
+#ifdef __EMSCRIPTEN__
+    virtual bool PollFrame();
+#endif /* __EMSCRIPTEN__ */
     virtual void SendResendRequest(short askCount);
 
     virtual void Dispose();

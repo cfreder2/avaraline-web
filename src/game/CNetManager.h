@@ -94,6 +94,16 @@ public:
     Boolean isPlaying;
     Boolean startingGame;
 
+#ifdef __EMSCRIPTEN__
+    // state of the polled start (see BeginGatherPlayers)
+    uint64_t gatherTime = 0, gatherResendTime = 0, gatherTimeLimit = 0;
+    int gatherLoopCount = 0;
+    long resumeStartTime = 0;
+    bool resumeNotReady = true;
+    int16_t pendingStartLT = -1;   // >= 0: SetLT(this); kPendingLTCurrent: SetLT(FrameLatency())
+    static const int16_t kPendingLTCurrent = 1000;
+
+#endif /* __EMSCRIPTEN__ */
     short serverOptions;
     short loaderSlot;
     uint8_t minAutoLatency;  // min frame latency for auto-LT
@@ -134,6 +144,14 @@ public:
     virtual Boolean ConfirmNetChange();
     virtual void ChangeNet(short netKind, std::string address);
     virtual void ChangeNet(short netKind, std::string address, std::string password);
+#ifdef __EMSCRIPTEN__
+    // Make newManager the live connection (the tail of ChangeNet).
+    virtual void AdoptCommManager(short netKind, std::unique_ptr<CCommManager> &newManager);
+    // A browser join in progress: ChangeNet starts it and returns, ProcessQueue polls it.
+    std::unique_ptr<CCommManager> pendingClient;
+    virtual void PollPendingConnect();
+    virtual void CancelPendingConnect();
+#endif /* __EMSCRIPTEN__ */
 
     virtual void ProcessQueue();
     virtual void SendRealName(short toSlot);
@@ -160,6 +178,12 @@ public:
 
     virtual void SendLoadLevel(std::string theSet, std::string theTag, int16_t originalSender = 0);
     virtual void ReceiveLoadLevel(short senderSlot, int16_t distribution, char *setAndTag, Fixed seed);
+#ifdef __EMSCRIPTEN__
+    // Browser: a level load waiting for its set to download (see ReceiveLoadLevel).
+    struct PendingLoad { bool active = false; short senderSlot = 0; int16_t originalSender = 0; std::string setAndTag; Fixed seed = 0; };
+    PendingLoad pendingLoad;
+    virtual void LevelSetFetched(std::string set, bool ok);
+#endif /* __EMSCRIPTEN__ */
     virtual void LevelLoadStatus(short senderSlot, short crc, OSErr err, std::string theTag);
 
     virtual void SendPingCommand(int trips);
@@ -201,6 +225,21 @@ public:
     virtual void UngatherPlayers();
 
     virtual void ResumeGame();
+#ifdef __EMSCRIPTEN__
+
+    // The two start-of-game waits above, in steps a browser can poll once a refresh (it
+    // cannot spin: nothing arrives until it returns). GatherPlayers is Begin, Poll until
+    // true, Finish; ResumeGame likewise.
+    virtual void BeginGatherPlayers();
+    virtual bool PollGatherPlayers();
+    virtual Boolean FinishGatherPlayers(Boolean isFreshMission);
+    virtual bool BeginResumeGame();     // false: no vehicle, nothing to wait for
+    virtual bool PollResumeGame();
+    virtual void FinishResumeGame();
+    // LT to set once an asynchronous start has finished (what ReceiveStartLevel and
+    // ReceiveResumeLevel set straight after ResumeGame on the desktop).
+    virtual void StartFinished();
+#endif /* __EMSCRIPTEN__ */
     virtual void FrameAction();
     virtual void HandleEvent(SDL_Event &event);
     virtual void AutoLatencyControl(FrameNumber frameNumber, Boolean didWait);

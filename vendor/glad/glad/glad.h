@@ -23,6 +23,7 @@
 #ifndef __glad_h_
 #define __glad_h_
 
+#ifndef __EMSCRIPTEN__
 #ifdef __gl_h_
 #error OpenGL header already included, remove this include, glad already provides it
 #endif
@@ -3727,5 +3728,15 @@ GLAPI PFNGLGETINTERNALFORMATIVPROC glad_glGetInternalformativ;
 #ifdef __cplusplus
 }
 #endif
+#else /* __EMSCRIPTEN__ */
+// --- Emscripten / WebGL2 build: there is no GL loader. The browser links GLES3
+// functions directly, so pull in the real GLES3 headers and skip all of GLAD.
+#include <GLES3/gl3.h>
+#include <GLES3/gl2ext.h>
+// Provide a no-op loader symbol in case any stray call site references it.
+typedef void* (*GLADloadproc)(const char *name);
+static inline int gladLoadGLES2Loader(GLADloadproc load) { (void)load; return 1; }
+static inline int gladLoadGLLoader(GLADloadproc load) { (void)load; return 1; }
+#endif /* __EMSCRIPTEN__ */
 
 #endif

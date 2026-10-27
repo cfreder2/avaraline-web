@@ -24,6 +24,11 @@
 #define CRAMTIME 5000 //	About 20 seconds.
 #define CRAMPACKSIZE 64
 #define kClientConnectTimeoutMsec 3000
+#ifdef __EMSCRIPTEN__
+// A browser joining over WebRTC has a handshake to make (signaling, ICE, DTLS) before the
+// first datagram can even leave, so it is given longer.
+#define kWebConnectTimeoutMsec 30000   // room for one renegotiation (web/js/mesh.js STALL_MS)
+#endif /* __EMSCRIPTEN__ */
 
 // Should be at most half of the lowest frameTime.  In classic game this was 4.096 ms.
 #define MSEC_PER_GET_CLOCK (1)
@@ -126,6 +131,15 @@ public:
 
     virtual void CreateServer();
     virtual OSErr ContactServer(IPaddress &serverAddr);
+#ifdef __EMSCRIPTEN__
+    // ContactServer in steps, for the browser, which cannot wait in a loop: Begin sends the
+    // login, Poll is called each refresh (0 = still waiting, 1 = connected, -1 = refused or
+    // timed out; rejectReason says which).
+    virtual OSErr BeginContactServer(IPaddress &serverAddr);
+    virtual int PollContactServer();
+    virtual void ConnectAsync(std::string address, std::string passwordStr);
+    uint32_t contactStartTime = 0;
+#endif /* __EMSCRIPTEN__ */
 
     virtual void Connect(std::string address); //	Client
     virtual void Connect(std::string address, std::string passwordStr);

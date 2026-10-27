@@ -1,0 +1,151 @@
+# Makefile.emscripten — Emscripten/WebAssembly build of Avara (browser target). Not named
+# Makefile.web: GNU make has a built-in rule that "tangles" X.web into X.p, and the desktop
+# make would try to rebuild its Makefile from it.
+#
+#   source .../emsdk/emsdk_env.sh      # put emcc/em++ on PATH
+#   make -f Makefile.emscripten               # -> build_web/avara.{html,js,wasm,data}
+#   make -f Makefile.emscripten serve         # serve it on port 8000 (web/serve.py)
+#
+# WebGL2 == OpenGL ES 3.0, which the renderer already targets via the AVARA_GLES
+# code path. Networking goes through web/library_avara_net.js (UDP-over-WebRTC).
+
+CXX = em++
+CC  = emcc
+
+BUILD_DIR ?= build_web
+# Node for the level packer. tools/build.mjs passes its own path: the emsdk puts its folder
+# first on PATH, and the "node" directory inside it stops make finding the program.
+NODE ?= node
+MKDIR_P   ?= mkdir -p
+
+# --- Sources ---------------------------------------------------------------
+# Same layout as the desktop Makefile, but swap the UDP socket layer:
+# exclude AvaraTCP.cpp (BSD sockets) and use AvaraTCP_web.cpp (WebRTC) instead.
+SRC_DIRS := $(shell find src -type d -not -path src)
+SRC_DIRS += vendor/nanovg vendor/nanogui vendor/pugixml vendor
+
+ALL_SRCS := $(shell find $(SRC_DIRS) -maxdepth 1 -name '*.cpp' -or -name '*.c')
+# Top-level src/ is intentionally excluded from SRC_DIRS (it holds several
+# alternative entry points). Add ONLY the game's main translation unit.
+ALL_SRCS += src/Avara.cpp
+
+# Entry points / tools that are not part of the game binary.
+EXCLUDE := src/BSPViewer.cpp src/hsnd2wav.cpp src/tests.cpp src/frandom.cpp src/fixed.cpp
+# Desktop-only UDP transport (replaced by AvaraTCP_web.cpp).
+EXCLUDE += src/net/AvaraTCP.cpp
+# sqlite persistence (replaced by CRUDnull in the web build).
+EXCLUDE += src/game/CRUDsqlite.cpp
+# GLAD loader C file — the browser links GLES3 directly.
+EXCLUDE += vendor/glad/glad.c
+# nanogui's desktop-GL GLShader/GLFramebuffer helpers — unused by Avara and full
+# of desktop-only calls (glDrawBuffer, GL_BGRA, geometry shaders, ...).
+EXCLUDE += vendor/nanogui/glutil.cpp
+
+SRCS := $(filter-out $(EXCLUDE), $(ALL_SRCS))
+
+INCFLAGS := $(addprefix -I, $(SRC_DIRS)) -Ivendor/glad
+
+# --- Flags -----------------------------------------------------------------
+DEFINES := -DAVARA_GLES -DNANOGUI_GLES -DGLM_ENABLE_EXPERIMENTAL
+# The desktop build compiles at -O0, so it tolerates this 1990s C code's
+# type-punning (CharWordLongPointer's union of pointers) and signed-overflow
+# fixed-point math. At -O2, clang's strict-aliasing and overflow assumptions
+# miscompile the collision/physics, making actors fall through level geometry.
+# Disable exactly those two UB optimizations (for both C and C++) and keep -O2.
+CPPFLAGS := $(INCFLAGS) $(DEFINES) -MMD -MP -O2 -g -fno-strict-aliasing -fwrapv
+CXXFLAGS := -std=c++17
+
+# Emscripten system ports: SDL2 + full GLES3 emulation over WebGL2.
+EMFLAGS := -sUSE_SDL=2 \
+           -sFULL_ES3=1 \
+           -sMIN_WEBGL_VERSION=2 \
+           -sMAX_WEBGL_VERSION=2 \
+           -sALLOW_MEMORY_GROWTH=1 \
+           -sINITIAL_MEMORY=268435456 \
+           -sSTACK_SIZE=4194304 \
+           -sEXIT_RUNTIME=0 \
+           -sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','HEAPU8','HEAP32','FS'] \
+           -sDISABLE_EXCEPTION_CATCHING=0 \
+           -lidbfs.js
+
+CPPFLAGS += $(EMFLAGS)
+LDFLAGS  := $(EMFLAGS)
+
+# Game traffic transport (JS side of AvaraTCP_web.cpp).
+LDFLAGS += --js-library $(CURDIR)/web/library_avara_net.js
+# The page. web/ is the plain page: play solo, host, join from an invite link, with the
+# WebRTC handshake relayed by web/serve.py. PAGE=<dir> builds <dir>/shell.html instead;
+# that directory's js/*.js, img/* and other *.html are copied beside the build as well.
+PAGE ?= web
+LDFLAGS += --shell-file $(CURDIR)/$(PAGE)/shell.html
+# Preload assets into the virtual filesystem at /rsrc and /levels.
+# basepath is forced to "/" via Module.arguments in the shell.
+# Only every set's manifest and the boot set are preloaded (levels-stub, written by
+# tools/pack_levels.mjs); the rest of each set is a pack the page fetches when one of its
+# levels is first played (web/js/levels.js).
+LDFLAGS += --preload-file rsrc@/rsrc
+LDFLAGS += --preload-file $(BUILD_DIR)/levels-stub@/levels
+
+OBJS := $(SRCS:%=$(BUILD_DIR)/%.o)
+DEPS := $(OBJS:.o=.d)
+
+TARGET := $(BUILD_DIR)/avara.html
+
+.PHONY: all serve clean version pagejs
+all: version $(TARGET) pagejs
+
+# The page's scripts: plain files beside the build, copied on every make so editing one
+# needs no relink. js/build.js names the build ("dev" unless something writes another).
+# The level packs. The packer runs on every build (about a second when nothing changed;
+# set names have spaces, which make cannot list as prerequisites) and rewrites index.json
+# only when what it preloads changed, so the page relinks only then.
+$(BUILD_DIR)/levels/index.json: FORCE
+	@$(NODE) tools/pack_levels.mjs levels $(BUILD_DIR)
+FORCE:
+
+pagejs:
+	@$(MKDIR_P) $(BUILD_DIR)/js
+	@cp -f web/js/*.js $(BUILD_DIR)/js/
+	@if [ "$(PAGE)" != web ]; then \
+	  $(MKDIR_P) $(BUILD_DIR)/img; \
+	  for f in $(PAGE)/js/*.js; do [ -f "$$f" ] && cp -f "$$f" $(BUILD_DIR)/js/; done; \
+	  for f in $(PAGE)/img/*; do [ -f "$$f" ] && cp -f "$$f" $(BUILD_DIR)/img/; done; \
+	  for f in $(PAGE)/*.html; do [ "$$f" != $(PAGE)/shell.html ] && [ -f "$$f" ] && cp -f "$$f" $(BUILD_DIR)/; done; \
+	fi; true
+	@test -f $(BUILD_DIR)/js/build.js || echo 'window.AVARA_BUILD = "dev";' > $(BUILD_DIR)/js/build.js
+
+# The desktop Makefile generates this from `git describe`; the web tree may not
+# be a git repo, so synthesize a stable placeholder if it's missing.
+# What the Player window and /info show: the commit (with -dirty when the tree has
+# changes), rewritten only when it changes so it does not force a recompile.
+version:
+	@v=$$(git describe --always --dirty 2>/dev/null || echo web); \
+	 n="#define GIT_VERSION \"web-$$v\""; \
+	 test -f src/util/GitVersion.h && grep -qF "$$n" src/util/GitVersion.h || echo "$$n" > src/util/GitVersion.h
+
+$(TARGET): $(OBJS) $(PAGE)/shell.html web/library_avara_net.js $(BUILD_DIR)/levels/index.json
+	$(MKDIR_P) $(BUILD_DIR)
+	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
+	@# Bundle attribution into the build output (MIT requires the notice to ship
+	@# with distributions; the page links to LICENSE.txt).
+	@cp -f LICENSE.txt $(BUILD_DIR)/ 2>/dev/null || true
+	@test -f CONTRIBUTORS.md && cp -f CONTRIBUTORS.md $(BUILD_DIR)/ || true
+	@echo "Built $@"
+
+$(BUILD_DIR)/%.cpp.o: %.cpp
+	$(MKDIR_P) $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.c.o: %.c
+	$(MKDIR_P) $(dir $@)
+	$(CC) $(CPPFLAGS) -c $< -o $@
+
+# Serve the build, and relay the WebRTC handshake for the plain page (web/serve.py).
+serve: all
+	@echo "Serving http://localhost:8000/avara.html  (Ctrl-C to stop)"
+	cd $(BUILD_DIR) && python3 $(CURDIR)/web/serve.py 8000
+
+clean:
+	$(RM) -r $(BUILD_DIR)
+
+-include $(DEPS)
