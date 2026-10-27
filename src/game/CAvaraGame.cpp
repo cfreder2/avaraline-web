@@ -19,6 +19,7 @@
 
 #include "AssetManager.h"
 #include "CAvaraGame.h"
+#include "CBSPPart.h"
 #include "CAvaraApp.h"
 //#include "CGameWind.h"
 #include "CCommManager.h"
@@ -512,12 +513,24 @@ void CAvaraGame::RunFrameActions() {
 }
 
 void CAvaraGame::RunActorFrameActions() {
+    // Actors that do not handle fast frames run only on classic frames. So they do not move
+    // in 15 Hz jumps, each of their parts keeps its pose from before the update, and they
+    // are drawn blended toward the new one by how far through the classic frame we are
+    // (CBSPPart::DrawTransform). Drawing only: the game itself is unchanged.
+    int perClassic = std::max(1, int(CLASSICFRAMETIME / frameTime));
+    framesSinceClassic = isClassicFrame ? 0 : framesSinceClassic + 1;
+    CBSPPart::blend = perClassic > 1 ? FIX(std::min(framesSinceClassic + 1, perClassic)) / perClassic : FIX1;
     for (CAbstractActor *theActor = actorList;
          theActor != NULL;
          theActor = nextActor)
     {
         // some actors (e.g. weapons) can remove themselves from the list, so save the nextActor before running FrameAction()
         nextActor = theActor->nextActor;
+        if (perClassic > 1 && isClassicFrame && !theActor->HandlesFastFPS()) {
+            // every classic frame, asleep or not: an actor that stops must stop being blended
+            for (short i = 0; i < theActor->partCount; i++)
+                if (theActor->partList[i]) theActor->partList[i]->RememberPose();
+        }
         if (theActor->HandlesFastFPS() || isClassicFrame) {
             if (theActor->isActive || --(theActor->sleepTimer) == 0) {
               theActor->FrameAction();

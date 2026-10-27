@@ -84,6 +84,7 @@ public:
     int32_t timeInSeconds;
     FrameNumber frameNumber;
     bool isClassicFrame;
+    int framesSinceClassic = 0;   // for drawing classic-only actors between updates
     int32_t frameAdjust;
 
     int currentGameId = 0; // resets when a new game starts

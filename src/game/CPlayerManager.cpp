@@ -1177,6 +1177,14 @@ void CPlayerManagerImpl::SetPlayerReady(bool isReady) {
         itsGame->StartIfReady();
     } else if (loadingStatus == kLReady && !isReady) {
         loadingStatus = prevState;
+    } else if (isReady && loadingStatus == kLConnected && slot == theNetManager->itsCommManager->myId) {
+        // Ready with no level loaded did nothing; say why. Every character of a message
+        // ending in a checkmark comes through here, so at most once every 2 s.
+        static uint32_t lastHint = 0;
+        if (SDL_GetTicks() - lastHint > 2000) {
+            lastHint = SDL_GetTicks();
+            itsGame->itsApp->AddMessageLine("No level loaded yet: pick one in the Levels window and click Load Level.");
+        }
     }
 }
 
