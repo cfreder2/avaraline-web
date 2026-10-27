@@ -11,7 +11,15 @@
 
 mergeInto(LibraryManager.library, {
     avara_net_init: function () {
-        if (globalThis.AvaraMesh && AvaraMesh.attach) AvaraMesh.attach();
+        if (!globalThis.AvaraMesh) return;
+        if (AvaraMesh.attach) AvaraMesh.attach();
+        // A datagram that arrives while the game owes ticks (it was waiting on another
+        // player at the last animation frame) may be the input it waits for: try them now
+        // (avara_web_poll in CAvaraApp.cpp) instead of up to a frame later. Module.avaraOwed
+        // is kept by the engine; nothing is called while the game is on time.
+        AvaraMesh.onarrive = function () {
+            if (Module.avaraOwed > 0 && Module._avara_web_poll) Module._avara_web_poll();
+        };
     },
 
     avara_net_send: function (peer, dataPtr, len) {

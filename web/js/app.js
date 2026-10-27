@@ -90,6 +90,7 @@
 
   function leave(why) {
     if (A.mode === 'host' || A.mode === 'client') {
+      AvaraLatency.host(false);
       call('avara_web_leave');
       AvaraMesh.leave();
       background(false);
@@ -103,7 +104,7 @@
   // ---- what the engine says (WebEvent in the engine) ------------------------------------
   function engineEvent(kind, d) {
     if (kind === 'net') {
-      if (d.state === 'hosting' && A.mode === 'host') hideOverlay();
+      if (d.state === 'hosting' && A.mode === 'host') { AvaraLatency.host(true); hideOverlay(); }
       else if (d.state === 'connected' && A.mode === 'client') hideOverlay();
       else if (d.state === 'failed' && A.mode === 'client') {
         AvaraMesh.leave();

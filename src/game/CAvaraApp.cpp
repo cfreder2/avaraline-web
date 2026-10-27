@@ -75,20 +75,85 @@ EM_JS(void, avara_frame_mark, (int frame), { if (typeof Module !== 'undefined' &
 // The tick period is the engine's frameTime stretched from 62.5 to 60 ticks a second, so
 // that every browser in a networked game runs at the same rate and none of them has to
 // stall for the others' frames (lockstep runs at the pace of the slowest peer).
+//
+// A tick that comes due while the game waits on another player's input is owed, not
+// dropped: it runs as soon as that input is here, either from the page the moment the
+// datagram arrives (avara_web_poll) or on the next refresh, one extra tick a refresh, so
+// the game keeps to the wall clock instead of playing on in slow motion. The same ticks
+// with the same inputs, only sooner. A wait longer than kMaxOwed ticks is a freeze, and
+// fast-forwarding through it afterwards would be worse than losing it, so the rest is
+// dropped.
+//
+// Making up every tick keeps each browser on its own wall clock, and so keeps whatever
+// offset between them the start left (one starts a round a little after another). The
+// browser running early then waits on the other's input at refresh after refresh, while
+// the other never waits. Dropping a tick on every wait, as before, evened that out, but
+// also turned every wait anywhere into lost game time for everyone. So a tick is dropped
+// only when waits keep starting (a new wait in more than kShiftAt of recent refreshes):
+// that moves this browser one frame later against the others, toward the offset where
+// neither waits, and costs one tick each time, a few times a round. A network hiccup is one
+// long wait, not many, and is made up instead.
 struct WebPacer {
     static constexpr int kMaxTicks = 4;     // more than this per refresh and we are drowning
+    static constexpr int kMaxOwed = 8;      // ticks owed after a wait that are made up (133 ms)
+    static constexpr int kCatchUp = 1;      // extra ticks a refresh while making them up
+    static constexpr double kShiftAt = 0.04;     // new waits in this share of refreshes: run a frame later
+    static constexpr double kShiftEveryMs = 1000; // and give the last move time to tell first
     double rafMs = 1000.0 / 60.0;           // smoothed time between refreshes
     double last = 0, acc = 0;
     int phase = 0;
+    int owed = 0;                           // ticks due that have not run yet
     bool running = false;
+    bool undrawn = false;                   // ticks ran since the last draw (from avara_web_poll)
+    double waitingSince = 0;                // the game has not advanced since (0: it is not waiting)
+    double newWaits = 0;                    // share of recent refreshes that began a wait (about a second)
+    double shiftAfter = 0;                  // no move later before this time
 
-    void Reset() { running = false; }
+    // For measurements (avara_web_pace): how this round's refreshes went.
+    struct {
+        int refreshes, due, waited, ticks, early, dropped, shifts, maxOwed;
+        double waitMs, longestWaitMs;
+    } st = {};
+
+    void Reset() { running = false; owed = 0; undrawn = false; waitingSince = 0; newWaits = 0; shiftAfter = 0; }
+
+    // The game advanced (at a refresh, or on a datagram's arrival): a wait is over.
+    void Advanced(double now) {
+        if (waitingSince > 0) {
+            st.waitMs += now - waitingSince;
+            st.longestWaitMs = std::max(st.longestWaitMs, now - waitingSince);
+            waitingSince = 0;
+        }
+    }
+
+    // After each refresh: waited is a tick was due and nothing could run.
+    void Refreshed(bool waited, double now) {
+        bool began = waited && waitingSince == 0;
+        if (began) waitingSince = now;
+        newWaits += ((began ? 1.0 : 0.0) - newWaits) / 60.0;
+        if (began && owed > 0 && newWaits > kShiftAt && now >= shiftAfter) {
+            owed--;
+            st.shifts++;
+            newWaits = 0;
+            shiftAfter = now + kShiftEveryMs;
+        }
+    }
+
+    // This refresh's ticks join any owed; how many to try now.
+    int Take(int due) {
+        int cap = std::max(due, kMaxOwed);
+        if (owed + due > cap) st.dropped += owed + due - cap;
+        owed = std::min(owed + due, cap);
+        st.maxOwed = std::max(st.maxOwed, owed);
+        return std::min(owed, due + kCatchUp);
+    }
+    void Ran() { owed--; st.ticks++; }
 
     int TicksDue(double now, double periodMs) {
         double dt = last > 0 ? now - last : rafMs;
         last = now;
         if (!running) {                     // first refresh of a game or resume: tick now
-            running = true; phase = 0; acc = 0;
+            running = true; phase = 0; acc = 0; owed = 0; waitingSince = 0; newWaits = 0; shiftAfter = 0; st = {};
             return 1;
         }
         if (dt > 0 && dt < 50) rafMs += (dt - rafMs) * 0.05;
@@ -105,13 +170,20 @@ struct WebPacer {
         acc -= ticks * periodMs;
         return ticks;
     }
-
-    // The game could not advance (waiting on a remote frame, or it stopped): drop the
-    // debt rather than fast-forwarding through it afterwards.
-    void Stalled() { acc = 0; phase = 0; }
 };
 static WebPacer gPacer;
 static bool gWebHidden;   // set by avara_web_background
+
+// The page's side of the pacer. A refresh that had a tick due and drew nothing because the
+// game was waiting on another player: the render scaler must not take it for a slow GPU.
+EM_JS(void, avara_wait_mark, (), { if (typeof Module !== 'undefined' && Module.onAvaraWait) Module.onAvaraWait(); });
+// Ticks owed: while there are any, a datagram arriving tries them at once (avara_web_poll,
+// called from web/library_avara_net.js).
+EM_JS(void, avara_owed_mark, (int owed), { if (typeof Module !== 'undefined') Module.avaraOwed = owed; });
+static void WebOwedChanged() {
+    static int shown = -1;
+    if (gPacer.owed != shown) { shown = gPacer.owed; avara_owed_mark(shown); }
+}
 
 #endif /* __EMSCRIPTEN__ */
 #include <chrono>
@@ -462,28 +534,42 @@ void CAvaraAppImpl::idle() {
 #else /* __EMSCRIPTEN__ */
     if (!itsGame->IsPlaying()) {
         gPacer.Reset();
+        WebOwedChanged();
         itsGame->tickAllowed = false;
         itsGame->GameTick();                // network and pings only
         itsGame->tickAllowed = true;        // a game starting from here runs its first tick
     } else {
-        int due = gPacer.TicksDue(emscripten_get_now(), itsGame->frameTime * (62.5 / 60.0));
-        bool advanced = false;
+        double now = emscripten_get_now();
+        int due = gPacer.TicksDue(now, itsGame->frameTime * (62.5 / 60.0));
+        int want = gPacer.Take(due);        // this refresh's ticks, and some owed
+        bool advanced = false, waited = false;
         // Always call once, so packets are processed on every refresh even when no frame
         // is due.
-        for (int i = 0; i < std::max(due, 1); i++) {
-            itsGame->tickAllowed = i < due;
+        for (int i = 0; i < std::max(want, 1); i++) {
+            itsGame->tickAllowed = i < want;
             if (!itsGame->GameTick()) {
-                if (i < due) gPacer.Stalled();
+                waited = i < want && itsGame->IsPlaying();   // the ticks stay owed
                 break;
             }
+            gPacer.Ran();
             advanced = true;
             if (!itsGame->IsPlaying()) break;
         }
         itsGame->tickAllowed = true;
-        if (advanced) {
+        gPacer.st.refreshes++;
+        if (want > 0) gPacer.st.due++;
+        if (advanced) gPacer.Advanced(now);
+        gPacer.Refreshed(waited && !advanced, now);
+        if (advanced || gPacer.undrawn) {
+            gPacer.undrawn = false;
             if (!gWebHidden) RenderContents();
             avara_frame_mark(itsGame->frameNumber);
+        } else if (waited) {
+            gPacer.st.waited++;
+            avara_wait_mark();
         }
+        if (!itsGame->IsPlaying()) gPacer.Reset();
+        WebOwedChanged();
 #endif /* __EMSCRIPTEN__ */
     }
     // output a coarse estimate of cpu time & percent every second when enabled
@@ -935,6 +1021,51 @@ EMSCRIPTEN_KEEPALIVE void avara_web_background(int hidden) {
     gWebHidden = hidden != 0;
     if (gWebHidden) emscripten_pause_main_loop();
     else emscripten_resume_main_loop();
+}
+
+// A datagram just arrived and the game owes ticks (it was waiting on another player when
+// the last refresh came): run them now, if their input is all here, rather than a whole
+// refresh later. Nothing is drawn; the next refresh draws. Returns the ticks run.
+EMSCRIPTEN_KEEPALIVE int avara_web_poll() {
+    static bool busy = false;
+    CAvaraGame *game = WebApp()->GetGame();
+    if (busy || gPacer.owed <= 0 || !game->IsPlaying() || game->startPhase != CAvaraGame::kStartIdle) return 0;
+    busy = true;
+    CheckSockets();
+    int ran = 0;
+    while (gPacer.owed > 0 && game->GameTick()) {
+        gPacer.Ran();
+        ran++;
+        if (!game->IsPlaying()) break;
+    }
+    if (ran) {
+        gPacer.undrawn = true;
+        gPacer.st.early += ran;
+        gPacer.Advanced(emscripten_get_now());
+    }
+    if (!game->IsPlaying()) gPacer.Reset();
+    WebOwedChanged();
+    busy = false;
+    return ran;
+}
+
+// For measurements: this round's refreshes so far. refreshes, due (with a tick to
+// run), waited (a tick due and nothing drawn), ticks (run), early (of them, run by
+// avara_web_poll between refreshes), dropped (owed past kMaxOwed), shifts (ticks dropped
+// to move a frame later), maxOwed, waitMs (total) and longestWaitMs (the longest the game
+// waited without advancing), and the latency tolerance and round trip now.
+EMSCRIPTEN_KEEPALIVE const char *avara_web_pace() {
+    static char buf[320];
+    CAvaraGame *game = WebApp()->GetGame();
+    CNetManager *net = WebApp()->GetNet();
+    auto &s = gPacer.st;
+    snprintf(buf, sizeof buf,
+             "{\"refreshes\":%d,\"due\":%d,\"waited\":%d,\"ticks\":%d,\"early\":%d,\"dropped\":%d,\"shifts\":%d,"
+             "\"maxOwed\":%d,\"waitMs\":%.0f,\"longestWaitMs\":%.0f,\"lt\":%.2f,\"rtt\":%ld}",
+             s.refreshes, s.due, s.waited, s.ticks, s.early, s.dropped, s.shifts, s.maxOwed, s.waitMs, s.longestWaitMs,
+             game->latencyTolerance,
+             net->itsCommManager->GetMaxRoundTrip(net->activePlayersDistribution & ~(1 << net->itsCommManager->myId)));
+    return buf;
 }
 
 // Back to playing alone: hosting stops, or the connection to the host closes.
