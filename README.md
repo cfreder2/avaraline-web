@@ -1,3 +1,18 @@
+> **This is an unofficial fork of [avaraline/Avara](https://github.com/avaraline/Avara).** It adds a
+> browser build of Avara: play it at <https://cfreder2.github.io/avaraline-web/>. It is not made,
+> run or endorsed by the Avaraline project. Avara is maintained by the Avaraline community; for
+> the desktop app, see [their releases](https://github.com/avaraline/Avara/releases) and the
+> [Avara Discord](https://discord.gg/yw5qnBtJd5).
+>
+> - [CREDITS.md](CREDITS.md): Juri Munkki, Ambrosia Software, Avaraline's contributors and the
+>   level designers.
+> - [AI.md](AI.md): this fork was made with AI assistance; how, and what is not AI-made. None of
+>   it is part of the Avaraline app.
+> - Branches: `port-fixes`, `web-build`, `netplay-pacing`, `actor-smoothing` and `small-fixes`
+>   are changes proposed for upstream; `site` is what the browser build runs (this branch).
+>
+> The rest of this file is Avaraline's README.
+
 
 # Avara
 

@@ -79,10 +79,12 @@ fs.cpSync(path.join(ROOT, PAGE, 'img'), path.join(DIST, 'img'), { recursive: tru
 let html = fs.readFileSync(path.join(BUILD, 'avara.html'), 'utf8');
 html = html.replace(/(<script[^>]*\ssrc=")((?:js\/[\w-]+|avara)\.js)(")/g, (m, a, src, b) => a + src + q + b);
 fs.writeFileSync(path.join(DIST, 'index.html'), html);
-// online.html: who is playing, live (web/site/js/online.js), its scripts stamped the same way
-const online = fs.readFileSync(path.join(ROOT, PAGE, 'online.html'), 'utf8')
-  .replace(/(<script[^>]*\ssrc=")(js\/[\w-]+\.js)(")/g, (m, a, src, b) => a + src + q + b);
-fs.writeFileSync(path.join(DIST, 'online.html'), online);
+// the site's other pages (online.html: who is playing, live; credits.html), scripts stamped the same way
+for (const f of fs.readdirSync(path.join(ROOT, PAGE)).filter(f => f.endsWith('.html') && f !== 'shell.html')) {
+  const page = fs.readFileSync(path.join(ROOT, PAGE, f), 'utf8')
+    .replace(/(<script[^>]*\ssrc=")(js\/[\w-]+\.js)(")/g, (m, a, src, b) => a + src + q + b);
+  fs.writeFileSync(path.join(DIST, f), page);
+}
 
 // every image the page names is there
 const imgs = [...html.matchAll(/(?:src|href)="(img\/[^"?]+)/g)].map(m => m[1]).filter(f => !fs.existsSync(path.join(DIST, f)));
