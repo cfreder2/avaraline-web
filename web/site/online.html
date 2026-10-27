@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Avara Online</title>
+<link rel="icon" type="image/png" href="img/icon-64.png">
+<!-- Who is playing Avara right now, live: everyone on (from the same presence channel the
+     game announces itself on), the open games, the desktop app's games (from Avaraline's
+     tracker, through supabase/functions/games), today's numbers, the leaderboard and the
+     latest rated rounds. Watches without being listed; no game loads. web/js/online.js. -->
+<style>
+  :root { --accent:#22d3ee; --bg:#0b0e14; --panel:#0f1720; --line:#243140;
+          --text:#e6edf3; --dim:#8b98a5; --faint:#5b6775; --bad:#f87171; --good:#4ade80; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; background:radial-gradient(circle at 50% 0%, #11202b, var(--bg) 60%) fixed; background-color:var(--bg); color:var(--text);
+              font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; min-height:100%; }
+  main { width:min(640px,100%); margin:0 auto; padding:24px 16px 48px; display:flex; flex-direction:column; align-items:center; gap:14px; }
+  header { display:flex; flex-direction:column; align-items:center; gap:6px; }
+  header img { width:min(320px,70vw); height:auto; }
+  header a { color:var(--accent); font-size:14px; text-decoration:none; }
+  header a:hover { text-decoration:underline; }
+  button { font:inherit; border:0; cursor:pointer; }
+  .screen { display:none; flex-direction:column; align-items:center; gap:14px; width:100%; }
+  .screen.on { display:flex; }
+  .tabs { display:flex; gap:4px; background:#0a1018; padding:4px; border-radius:10px; box-shadow:inset 0 0 0 1px var(--line); }
+  .tabs button { background:none; color:var(--dim); padding:7px 14px; border-radius:7px; font-size:14px; }
+  .tabs button.on { background:#1b2733; color:var(--text); }
+  .hint { font-size:13px; color:var(--dim); text-align:center; line-height:1.55; }
+  .online-pane { width:100%; display:flex; flex-direction:column; gap:8px; }
+  .set-head { font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); margin:12px 0 2px; }
+  .levels { width:100%; display:flex; flex-direction:column; gap:8px; }
+  .lvl { display:grid; grid-template-columns:1fr auto auto; gap:10px; align-items:center; padding:10px 12px; border-radius:10px;
+         background:var(--panel); box-shadow:inset 0 0 0 1px var(--line); text-align:left; }
+  .lvl.me { box-shadow:inset 0 0 0 1px var(--accent); }
+  .lvl-main { min-width:0; }
+  .lvl-title { font-weight:700; font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .lvl-by { font-size:12.5px; color:var(--dim); overflow-wrap:anywhere; }
+  .lvl-acts { display:flex; gap:4px; }
+  .online-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--good); margin-right:8px; vertical-align:middle; }
+  .online-dot.off { background:#3a4652; }
+  .elo { font:12.5px ui-monospace,Menlo,monospace; color:var(--accent); }
+  .elo.big { font-size:16px; }
+  .guest { font-size:12px; color:var(--faint); font-weight:400; }
+  a.applink { padding:5px 10px; font-size:12.5px; border-radius:7px; background:#1b2733; color:var(--dim); text-decoration:none; white-space:nowrap; }
+  a.applink:hover { color:var(--text); box-shadow:inset 0 0 0 1px var(--line); }
+  .empty { color:var(--faint); font-size:14px; padding:22px 0; text-align:center; line-height:1.6; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="img/avara-logo.png" alt="Avara">
+    <a href="./">Play Avara</a>
+  </header>
+  <div class="screen" id="s-online">
+    <div class="tabs"><button id="ot-people">People</button><button id="ot-games">Games</button><button id="ot-top">Leaderboard</button></div>
+    <div class="hint" id="onlineSummary">Connecting…</div>
+    <div id="op-people" class="online-pane">
+      <div class="set-head">Everyone online</div>
+      <div class="levels" id="peopleList"></div>
+    </div>
+    <div id="op-games" class="online-pane"><div class="levels" id="onlineGames"></div></div>
+    <div id="op-top" class="online-pane"><div class="levels" id="topList"></div><div id="recentList" class="online-pane"></div></div>
+  </div>
+</main>
+<script src="js/build.js"></script>
+<script src="js/supa.js"></script>
+<script src="js/online.js"></script>
+<script>AvaraOnline.watch();</script>
+</body>
+</html>

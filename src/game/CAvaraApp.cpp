@@ -532,6 +532,32 @@ void CAvaraAppImpl::idle() {
     if (itsGame->GameTick()) {
         RenderContents();
 #else /* __EMSCRIPTEN__ */
+    // Who is in the game, for the page's game list: sent when it changes (checked twice a
+    // second).
+    static int rosterCountdown = 0;
+    static std::string lastRoster;
+    if (--rosterCountdown <= 0) {
+        rosterCountdown = 30;
+        std::string r = "{\"slot\":" + std::to_string(gameNet->itsCommManager->myId) +
+                        ",\"net\":" + std::to_string(gameNet->netStatus) + ",\"players\":[";
+        bool first = true;
+        for (int i = 0; i < kMaxAvaraPlayers; i++) {
+            CPlayerManager *pm = gameNet->playerTable[i].get();
+            if (!pm || pm->PlayerName()[0] == 0) continue;
+            if (!first) r += ",";
+            first = false;
+            r += "{\"slot\":" + std::to_string(i) +
+                 ",\"name\":" + WebJsonString(std::string((char *)pm->PlayerName() + 1, pm->PlayerName()[0])) +
+                 ",\"status\":" + std::to_string((int)pm->LoadingStatus()) + "}";
+        }
+        r += "]}";
+        if (r != lastRoster) {
+            lastRoster = r;
+            WebEvent("roster", r);
+        }
+#endif /* __EMSCRIPTEN__ */
+    }
+#ifdef __EMSCRIPTEN__
     if (!itsGame->IsPlaying()) {
         gPacer.Reset();
         WebOwedChanged();
@@ -570,8 +596,8 @@ void CAvaraAppImpl::idle() {
         }
         if (!itsGame->IsPlaying()) gPacer.Reset();
         WebOwedChanged();
-#endif /* __EMSCRIPTEN__ */
     }
+#endif /* __EMSCRIPTEN__ */
     // output a coarse estimate of cpu time & percent every second when enabled
     if (curFrame > 1 && curFrame != itsGame->frameNumber && Debug::IsEnabled("cpu")) {
         procTime = SDL_GetTicks() - procTime;
@@ -697,6 +723,16 @@ void CAvaraAppImpl::GameStarted(LevelInfo &loadedLevel) {
     vp->showTransparent = false;
     itsGame->IncrementGameCounter();
     MessageLine(kmStarted, MsgAlignment::Center);
+#ifdef __EMSCRIPTEN__
+    {
+        int players = 0;
+        for (int i = 0; i < kMaxAvaraPlayers; i++)
+            if (gameNet->activePlayersDistribution & (1 << i)) players++;
+        WebEvent("start", "{\"name\":" + WebJsonString(loadedLevel.levelName) + ",\"set\":" + WebJsonString(loadedLevel.setTag) +
+                          ",\"players\":" + std::to_string(players) + ",\"slot\":" + std::to_string(gameNet->itsCommManager->myId) +
+                          ",\"frameTime\":" + std::to_string(itsGame->frameTime) + "}");
+    }
+#endif /* __EMSCRIPTEN__ */
     itsAPI->RecordGameStart(itsGame->currentGameId, loadedLevel);
     levelWindow->UpdateRecents();
     if (controller) {
@@ -804,6 +840,10 @@ OSErr CAvaraAppImpl::LoadLevel(std::string set, std::string levelTag, CPlayerMan
         AddMessageLine(msgStr);
 
         levelWindow->SelectLevel(set, level);
+#ifdef __EMSCRIPTEN__
+        WebEvent("level", "{\"set\":" + WebJsonString(set) + ",\"tag\":" + WebJsonString(levelTag) +
+                          ",\"name\":" + WebJsonString(level) + "}");
+#endif /* __EMSCRIPTEN__ */
 
         // calculate the extent of visible objects in the level (used for level previews and random incarnators)
         itsGame->CalculateExtent();
@@ -1116,6 +1156,33 @@ EMSCRIPTEN_KEEPALIVE int avara_web_set_pref(const char *name, const char *value)
 // engine sees is gone when the tab closes).
 EMSCRIPTEN_KEEPALIVE void avara_web_save_prefs() {
     WebApp()->SavePrefs();
+}
+
+// For harnesses: every actor's parts (up to 200), where each is drawn this
+// frame and where the game has it (x, z), and whether it is drawn blended between updates
+// (an actor that runs only on classic frames), with the blend.
+EMSCRIPTEN_KEEPALIVE const char *avara_web_blend_probe() {
+    static std::string out;
+    CAvaraGame *game = WebApp()->GetGame();
+    char buf[160];
+    snprintf(buf, sizeof buf, "{\"frame\":%d,\"blend\":%.3f,\"parts\":[", game ? game->frameNumber : -1, ToFloat(CBSPPart::blend));
+    out = buf;
+    int n = 0;
+    for (CAbstractActor *a = game ? game->actorList : nullptr; a && n < 200; a = a->nextActor) {
+        for (short i = 0; i < a->partCount && n < 200; i++) {
+            CSmartPart *part = a->partList[i];
+            if (!part) continue;
+            Matrix m;
+            part->DrawTransform(m);
+            snprintf(buf, sizeof buf, "%s[%.4f,%.4f,%.4f,%.4f,%d]", n ? "," : "",
+                     ToFloat(m[3][0]), ToFloat(m[3][2]), ToFloat(part->modelTransform[3][0]), ToFloat(part->modelTransform[3][2]),
+                     part->blendOn ? 1 : 0);
+            out += buf;
+            n++;
+        }
+    }
+    out += "]}";
+    return out.c_str();
 }
 
 // For harnesses: where the local player is, and the sizes the view uses, as JSON.

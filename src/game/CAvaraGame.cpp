@@ -815,6 +815,9 @@ bool CAvaraGame::StartAfterGather(Boolean doStart, Boolean freshMission) {
         } else {
             itsApp->MessageLine(kmRestarted, MsgAlignment::Center);
             soundHub->MuteFlag(false);
+#ifdef __EMSCRIPTEN__
+            WebEvent("resume", "{}");
+#endif /* __EMSCRIPTEN__ */
         }
 
         // TODO: syncing start dialog
@@ -990,6 +993,25 @@ void CAvaraGame::GameStop() {
     scoreKeeper->StopPause(gameStatus == kPauseStatus);
 
 #ifdef __EMSCRIPTEN__
+    {   // the page's telemetry: how this round (or this stretch of it, for a pause) went
+        static const char *names[] = {"playing", "abort", "ready", "pause", "novehicle", "win", "lose"};
+        short me = itsNet->itsCommManager->myId;
+        PlayerScoreRecord &rec = scoreKeeper->localScores.player[me];
+        CAbstractPlayer *local = GetLocalPlayer();
+        int players = 0;
+        for (int i = 0; i < kMaxAvaraPlayers; i++)
+            if (itsNet->startPlayersDistribution & (1 << i)) players++;
+        WebEvent("stop", "{\"status\":\"" + std::string(gameStatus >= 0 && gameStatus <= kLoseStatus ? names[gameStatus] : "?") +
+                 "\",\"frame\":" + std::to_string(frameNumber) +
+                 ",\"secs\":" + std::to_string(frameNumber * frameTime / 1000.0) +
+                 ",\"points\":" + std::to_string(rec.points) +
+                 ",\"kills\":" + std::to_string(rec.kills) +
+                 ",\"lives\":" + std::to_string(local ? local->lives : rec.lives) +
+                 ",\"rank\":" + std::to_string((int)rec.exitRank) +
+                 ",\"players\":" + std::to_string(players) +
+                 ",\"lt\":" + std::to_string(latencyTolerance) +
+                 ",\"rtt\":" + std::to_string(itsNet->itsCommManager->GetMaxRoundTrip(itsNet->startPlayersDistribution & ~(1 << me))) + "}");
+    }
 
 #endif /* __EMSCRIPTEN__ */
     itsNet->UngatherPlayers();

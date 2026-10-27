@@ -29,6 +29,9 @@
 #include "Preferences.h"
 #include "System.h"
 #include "Debug.h"
+#ifdef __EMSCRIPTEN__
+#include "WebBridge.h"
+#endif /* __EMSCRIPTEN__ */
 
 #include <SDL2/SDL.h>
 #include <utf8.h>
@@ -869,6 +872,10 @@ void CPlayerManagerImpl::RosterMessageText(short len, const char *c) {
             case 13:
                 // ¬
                 ((CAvaraAppImpl*)itsGame->itsApp)->rosterWindow->NewChatLine(playerName, slot, chatText);
+#ifdef __EMSCRIPTEN__
+                WebEvent("chat", "{\"slot\":" + std::to_string(slot) + ",\"name\":" + WebJsonString(GetPlayerName()) +
+                                 ",\"text\":" + WebJsonString(chatText) + "}");
+#endif /* __EMSCRIPTEN__ */
 
                 lineBuffer.insert(lineBuffer.end(), lThing_utf8, lThing_utf8 + strlen(lThing_utf8));
                 // FlushMessageText(true);

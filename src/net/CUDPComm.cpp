@@ -681,7 +681,12 @@ Boolean CUDPComm::PacketHandler(PacketInfo *thePacket) {
 
                 if (thePacket->p1 == 0) //	The server is gone! All hope is gone...we are lost!
                 {
+#ifndef __EMSCRIPTEN__
                     SendPacket(1 << myId, kpKillConnection, myId, 0, 0, 0, NULL);
+#else /* __EMSCRIPTEN__ */
+                    // p2 says why, so the page can tell "the host left" from "you were kicked"
+                    SendPacket(1 << myId, kpKillConnection, myId, kpPacketProtocolLogout, 0, 0, NULL);
+#endif /* __EMSCRIPTEN__ */
                 } else {
                     if (myId == 0) {
                         SendPacket(kdEveryone, kpKillConnection, thePacket->p1, 0, 0, 0, NULL);

@@ -26,3 +26,6 @@ Avara.msvc/Tests/
 compile_commands.json
 *.vcxproj.user
 
+
+# The site build staged for GitHub Pages by tools/build.mjs
+dist/

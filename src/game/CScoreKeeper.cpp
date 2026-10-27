@@ -18,6 +18,9 @@
 //#include "Aliases.h"
 #include "CNetManager.h"
 #include "CommDefs.h"
+#ifdef __EMSCRIPTEN__
+#include "WebBridge.h"
+#endif /* __EMSCRIPTEN__ */
 //#include "JAMUtil.h"
 //#include "CInfoPanel.h"
 #include "InfoMessages.h"
@@ -397,6 +400,20 @@ void CScoreKeeper::ReceiveResults(int32_t *newResults) {
         gameIdCheck = itsGame->currentGameId;
         std::vector<FinishRecord> rankings = DetermineFinishOrder();
         UpdatePlayerRatings(rankings);
+#ifdef __EMSCRIPTEN__
+        // the same finish order, worst to first, for the page: the host's reports it and
+        // the accounts' Elo ratings are kept in the database (web/js/online.js)
+        std::string r = "{\"players\":[";
+        for (size_t k = 0; k < rankings.size(); k++) {
+            if (k) r += ",";
+            r += "{\"slot\":" + std::to_string(rankings[k].playerIndex) +
+                 ",\"name\":" + WebJsonString(rankings[k].playerName) +
+                 ",\"team\":" + std::to_string(rankings[k].teamColor) +
+                 ",\"lives\":" + std::to_string(rankings[k].lives) +
+                 ",\"score\":" + std::to_string(rankings[k].score) + "}";
+        }
+        WebEvent("result", r + "]}");
+#endif /* __EMSCRIPTEN__ */
     }
 }
 
