@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Avara</title>
+<style>
+  html, body { margin:0; height:100%; background:#06090f; color:#d8e2ea;
+               font:15px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; overflow:hidden; }
+  canvas#canvas { position:fixed; inset:0; display:block; width:100vw; height:100vh; background:#000; outline:none; }
+  #overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+             padding:16px; background:#06090f; z-index:10; }
+  #overlay.hidden { display:none; }
+  .screen { display:none; flex-direction:column; align-items:center; gap:12px; width:min(420px,100%); text-align:center; }
+  .screen.on { display:flex; }
+  h1 { margin:0 0 8px; font-size:34px; letter-spacing:.12em; }
+  input { font:inherit; padding:8px 10px; border-radius:6px; border:1px solid #35424e; background:#0d151d; color:inherit; width:220px; }
+  button { font:inherit; padding:9px 16px; border-radius:6px; border:1px solid #35424e; background:#16222d; color:inherit; cursor:pointer; min-width:220px; }
+  button:hover { background:#1e2e3c; }
+  .note, .small { color:#8a99a6; margin:0; }
+  .small { font-size:12px; }
+  .small a { color:#8a99a6; }
+  #loadbar { width:260px; height:4px; background:#1a2530; border-radius:2px; overflow:hidden; }
+  #loadfill { height:100%; width:0; background:#5fb3d9; }
+  #bar { position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:5; display:flex; gap:8px; align-items:center;
+         background:rgba(6,9,15,.8); padding:4px 8px; border-radius:6px; font-size:13px; }
+  #bar[hidden] { display:none; }
+  #bar button { min-width:0; padding:4px 10px; font-size:13px; }
+  #fps { position:fixed; top:8px; right:8px; z-index:5; font:12px/1.3 ui-monospace, Menlo, monospace;
+         background:rgba(0,0,0,.6); padding:4px 6px; border-radius:4px; white-space:pre; display:none; }
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+<div id="bar" hidden><span id="where"></span><button id="b-link" hidden>Copy invite link</button><button id="b-leave">Leave</button></div>
+<div id="fps"></div>
+<div id="overlay">
+  <div class="screen on" id="s-loading">
+    <h1>AVARA</h1>
+    <div id="loadbar"><div id="loadfill"></div></div>
+    <p class="note" id="status">Loading…</p>
+  </div>
+  <div class="screen" id="s-menu">
+    <h1>AVARA</h1>
+    <input id="callsign" maxlength="24" placeholder="Callsign" autocomplete="off">
+    <button id="b-solo">Play solo</button>
+    <button id="b-host">Host a game</button>
+    <p class="note">To join a game, open the invite link its host copies from the game.</p>
+    <p class="small">F8 frame rate · <a href="LICENSE.txt">License</a> · <a href="CONTRIBUTORS.md">Contributors</a> · build <span id="build"></span></p>
+  </div>
+  <div class="screen" id="s-msg">
+    <p id="msg"></p>
+    <button id="b-msg" hidden>Back</button>
+  </div>
+</div>
+<script src="js/build.js"></script>
+<script src="js/signal.js"></script>
+<script src="js/mesh.js"></script>
+<script src="js/levels.js"></script>
+<script>
+  var canvas = document.getElementById('canvas');
+  var params = new URLSearchParams(location.search);
+  function setStatus(s) { document.getElementById('status').textContent = s; }
+  function setBar(frac) { document.getElementById('loadfill').style.width = Math.max(0, Math.min(1, frac)) * 100 + '%'; }
+
+  // Fort of Bob is loaded behind the menu; ?cmd=/load+clock (repeatable) loads another.
+  var startupArgs = ['--basepath', '/'];
+  var cmds = params.getAll('cmd');
+  if (cmds.length === 0) cmds.push('/load fort of bob');
+  cmds.forEach(function (c) { startupArgs.push('--command', c); });
+
+  // 4x multisampling, except on software renderers, where it halves the frame rate.
+  var msaa = 4;
+  try {
+    var probe = document.createElement('canvas').getContext('webgl2');
+    var dbg = probe && probe.getExtension('WEBGL_debug_renderer_info');
+    var gpu = probe ? String(dbg ? probe.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : probe.getParameter(probe.RENDERER)) : '';
+    if (/swiftshader|llvmpipe|software|basic render/i.test(gpu)) msaa = 0;
+    var lose = probe && probe.getExtension('WEBGL_lose_context'); if (lose) lose.loseContext();
+  } catch (e) {}
+
+  // Every file the engine fetches carries the build stamp, so a cached avara.wasm is never
+  // paired with a newer avara.js.
+  var V = window.AVARA_BUILD && AVARA_BUILD !== 'dev' ? '?v=' + encodeURIComponent(AVARA_BUILD) : '';
+  var Module = {
+    canvas: canvas,
+    locateFile: function (p) { return p + V; },
+    arguments: startupArgs,
+    avaraRenderScale: parseFloat(params.get('res')) > 0 ? parseFloat(params.get('res')) : 1,
+    avaraMSAA: msaa,
+    // Compile the wasm while it downloads.
+    instantiateWasm: function (imports, receiveInstance) {
+      setStatus('Downloading the engine…');
+      WebAssembly.instantiateStreaming(fetch('avara.wasm' + V), imports)
+        .then(function (r) { setStatus('Loading levels…'); setBar(0.1); receiveInstance(r.instance, r.module); })
+        .catch(function () {   // a server with the wrong MIME type for .wasm
+          fetch('avara.wasm' + V).then(function (r) { return r.arrayBuffer(); })
+            .then(function (buf) { return WebAssembly.instantiate(buf, imports); })
+            .then(function (r) { setBar(0.1); receiveInstance(r.instance, r.module); })
+            .catch(function (e) { setStatus('Load failed: ' + e.message); console.error(e); });
+        });
+      return {};
+    },
+    setStatus: function (text) {
+      var m = text && text.match(/([\d.]+)\/([\d.]+)/);
+      if (m && +m[2]) { setStatus('Downloading levels…'); setBar(0.1 + 0.85 * m[1] / m[2]); }
+    },
+    print: function (t) { console.log(t); },
+    printErr: function (t) { console.error(t); },
+    postRun: [function () {
+      if (!window.AvaraApp) { setStatus('Part of the page did not download. Reload to try again.'); return; }
+      setBar(1);
+      AvaraApp.ready();
+    }],
+    onAvaraEvent: function (kind, data) { if (window.AvaraApp) AvaraApp.engineEvent(kind, data); },
+  };
+
+  // Keys typed into the page's own text box stop at the document, before SDL (which
+  // listens on the window and cancels their default) can take them.
+  ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+    document.addEventListener(type, function (e) {
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) e.stopPropagation();
+    });
+  });
+  // SDL cancels the mouse's default actions, including taking focus; take it first (in an
+  // iframe, focus starts in the page around it).
+  window.addEventListener('pointerdown', function () { if (!document.hasFocus()) window.focus(); }, true);
+  canvas.addEventListener('mousedown', function () { canvas.focus(); });
+  // In play, keep the browser from taking game keys: Tab (focus), arrows (scroll), and
+  // Ctrl+R (starts a round in the game, reloads the page in a browser).
+  window.addEventListener('keydown', function (e) {
+    if (!document.getElementById('overlay').classList.contains('hidden')) return;
+    var t = e.target;
+    if (t && t.tagName === 'INPUT') return;
+    if ((e.ctrlKey && !e.metaKey && (e.key === 'r' || e.key === 'R')) ||
+        ['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
+  }, true);
+
+  // F8: frames drawn per second, and the slowest second in the last ten, during a round.
+  // The engine calls Module.onAvaraFrame(frameNumber) for each frame drawn (-1 in the menus).
+  (function () {
+    var el = document.getElementById('fps'), shown = false, count = 0, since = performance.now(), recent = [];
+    Module.onAvaraFrame = function (frame) { if (frame >= 0) count++; };
+    setInterval(function () {
+      var t = performance.now(), fps = count * 1000 / (t - since);
+      count = 0; since = t;
+      if (fps > 0) { recent.push(fps); if (recent.length > 10) recent.shift(); }
+      if (shown) el.textContent = fps > 0 ? Math.round(fps) + ' fps\nmin ' + Math.round(Math.min.apply(null, recent)) : 'fps\n(in a round)';
+    }, 1000);
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'F8') { shown = !shown; el.style.display = shown ? 'block' : 'none'; }
+    });
+  })();
+</script>
+<script src="js/app.js"></script>
+{{{ SCRIPT }}}
+</body>
+</html>
