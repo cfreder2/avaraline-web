@@ -18,6 +18,11 @@ not Avaraline's.
 
 <!-- Trailer: put the github.com/user-attachments/assets/... link that GitHub gives for
      Avara-trailer-10MB.mp4 on its own line here, with a blank line above and below. -->
+     
+
+https://github.com/user-attachments/assets/9c28ca84-859d-4c96-8774-ff18bf4693ae
+
+
 
 <table>
   <tr>
