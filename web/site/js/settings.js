@@ -180,6 +180,10 @@
     box.appendChild(toggle('Connect only through the host', AvaraSupa.store('avara.hostOnly') === '1', function (v) {
       AvaraSupa.store('avara.hostOnly', v ? '1' : '0');
     }, 'Other players can see the IP address of anyone they connect to directly. With this on, only the host sees yours; the others reach you through the host, which can add a little delay. Applies to the next game you join.'));
+    box.appendChild(toggle('Send play statistics', AvaraSupa.store('avara.offline') !== '1', function (v) {
+      AvaraSupa.store('avara.offline', v ? '0' : '1');
+      AvaraTelemetry.setEnabled(v);
+    }, 'Rounds played, frame rate, and whether joining games works, to find bugs. No IP or e-mail addresses. The full list: github.com/cfreder2/avaraline-web#privacy'));
 
     box.appendChild(el('div', 'set-head', 'Keys'));
     var map = prefs.keyboard || {};

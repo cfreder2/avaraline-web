@@ -12,7 +12,8 @@
  * Every call fails soft and nothing in the game waits on it.
  *
  * Off on localhost, so building and testing does not fill the tables (?telemetry turns
- * it on there); localStorage['avara.offline']='1' turns it off anywhere. A session no
+ * it on there); localStorage['avara.offline']='1' (Settings > Send play statistics)
+ * turns it off anywhere. A session no
  * person is playing is still reported but flagged `synthetic`, and every summary view
  * leaves those out: a browser driven by automation (navigator.webdriver), a page that
  * set window.__avaraTest, or a ?debug / ?test start.
@@ -176,6 +177,8 @@
     event: event,
     count: function (what) { if (what in T) T[what]++; },
     flush: flush,
+    // Settings > Send play statistics: off stops every row from now, the heartbeat's too
+    setEnabled: function (on) { T.enabled = !!on && (host !== 'local' || q.has('telemetry')); },
   };
 })();
 
